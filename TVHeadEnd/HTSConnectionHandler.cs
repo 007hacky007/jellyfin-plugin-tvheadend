@@ -27,6 +27,18 @@ namespace TVHeadEnd
         /// </summary>
         private const int DvrPriorityNotSet = 5;
 
+        private const int MaxRetryDelaySeconds = 60;
+
+        // Give up a single connection attempt after this time (an unreachable
+        // host would otherwise block for the full kernel TCP timeout).
+        private static readonly TimeSpan _connectTimeout = TimeSpan.FromSeconds(10);
+
+        // How long callers may wait for the initial sync while a connection
+        // attempt is in flight or the initial data is still being received.
+        // When the server is known to be unreachable callers fail immediately
+        // and never wait.
+        private static readonly TimeSpan _initialLoadTimeout = TimeSpan.FromMinutes(5);
+
         private readonly object _lock = new object();
 
         private readonly ILoggerFactory _loggerFactory;
@@ -42,6 +54,9 @@ namespace TVHeadEnd
         private volatile bool _initialLoadFinished;
         private volatile bool _connected;
         private volatile bool _configured;
+        private volatile bool _firstConnectAttemptCompleted;
+
+        private Task? _connectionTask;
 
         private HTSConnectionAsync? _htsConnection;
         private int _priority;
@@ -87,20 +102,31 @@ namespace TVHeadEnd
 
         public int WaitForInitialLoad(CancellationToken cancellationToken)
         {
-            EnsureConnection();
-            DateTime start = DateTime.Now;
-            while (!_initialLoadFinished || cancellationToken.IsCancellationRequested)
+            StartConnectionLoop();
+            DateTime deadline = DateTime.UtcNow + _initialLoadTimeout;
+            while (!cancellationToken.IsCancellationRequested)
             {
-                Thread.Sleep(500);
-                TimeSpan duration = DateTime.Now - start;
-                long durationInSec = duration.Ticks / TimeSpan.TicksPerSecond;
-                if (durationInSec > 60 * 15) // 15 Min timeout, should be enough to load huge data count
+                if (_initialLoadFinished)
+                {
+                    return 0;
+                }
+
+                // Fail fast while the server is unreachable: the background
+                // loop keeps reconnecting, callers must not block on it.
+                if (_firstConnectAttemptCompleted && !_connected)
                 {
                     return -1;
                 }
+
+                if (DateTime.UtcNow > deadline)
+                {
+                    return -1;
+                }
+
+                Thread.Sleep(100);
             }
 
-            return 0;
+            return -1;
         }
 
         private void Init()
@@ -270,13 +296,13 @@ namespace TVHeadEnd
         /// Builds an absolute, credentialed URL for a resource served by TVHeadend over HTTP.
         /// </summary>
         /// <remarks>
-        /// The web root is the one reported by the server, so a connection is established first.
+        /// The web root is the one reported by the server, so it is only final once connected.
         /// </remarks>
         /// <param name="relativePath">The path below the web root, with or without a leading slash.</param>
         /// <returns>An absolute URL including the configured credentials.</returns>
         public string GetAuthenticatedUrl(string relativePath)
         {
-            EnsureConnection();
+            StartConnectionLoop();
 
             return "http://" + _userName + ":" + _password + "@" + _tvhServerName + ":" + _httpPort + _webRoot
                 + "/" + relativePath.TrimStart('/');
@@ -304,31 +330,49 @@ namespace TVHeadEnd
         //    return stream;
         // }
 
-        private void EnsureConnection()
+        private void StartConnectionLoop()
         {
             Init();
 
-            // _logger.LogDebug("[TVHclient] HTSConnectionHandler.ensureConnection");
-            if (_htsConnection == null || _htsConnection.NeedsRestart())
-            {
-                _logger.LogDebug("[TVHclient] HTSConnectionHandler.ensureConnection: create new HTS connection");
-                // "clientversion" is the client's own version, not the protocol version -
-                // TVHeadend only reports it, but sending the HTSP number here was misleading.
-                Version? version = typeof(HTSConnectionHandler).Assembly.GetName().Version;
-                _htsConnection = new HTSConnectionAsync(
-                    this,
-                    "Jellyfin-TVHeadend",
-                    version?.ToString() ?? "unknown",
-                    _loggerFactory);
-                _connected = false;
-            }
-
             lock (_lock)
             {
-                if (!_connected)
+                if (_connected || (_connectionTask != null && !_connectionTask.IsCompleted))
                 {
+                    return;
+                }
+
+                _connectionTask = Task.Run(() => ConnectionLoop());
+            }
+        }
+
+        private async Task ConnectionLoop()
+        {
+            int attempt = 0;
+            while (!_connected)
+            {
+                try
+                {
+                    HTSConnectionAsync connection;
+                    lock (_lock)
+                    {
+                        if (_htsConnection == null || _htsConnection.NeedsRestart())
+                        {
+                            _logger.LogDebug("[TVHclient] HTSConnectionHandler.ConnectionLoop: create new HTS connection");
+                            // "clientversion" is the client's own version, not the protocol version -
+                            // TVHeadend only reports it, but sending the HTSP number here was misleading.
+                            Version? version = typeof(HTSConnectionHandler).Assembly.GetName().Version;
+                            _htsConnection = new HTSConnectionAsync(
+                                this,
+                                "Jellyfin-TVHeadend",
+                                version?.ToString() ?? "unknown",
+                                _loggerFactory);
+                        }
+
+                        connection = _htsConnection;
+                    }
+
                     _logger.LogDebug(
-                        "[TVHclient] HTSConnectionHandler.ensureConnection: used connection parameters: " +
+                        "[TVHclient] HTSConnectionHandler.ConnectionLoop: used connection parameters: " +
                         "TVH Server = '{Servername}'; HTTP Port = '{Httpport}'; HTSP Port = '{Htspport}'; Web-Root = '{Webroot}'; " +
                         "User = '{User}'; Password set = '{Passexists}'",
                         _tvhServerName,
@@ -338,42 +382,73 @@ namespace TVHeadEnd
                         _userName,
                         _password.Length > 0);
 
-                    _htsConnection.Open(_tvhServerName, _htspPort);
-                    _connected = _htsConnection.Authenticate(_userName, _password);
+                    connection.Open(_tvhServerName, _htspPort, _connectTimeout);
 
-                    if (_connected)
+                    if (connection.Authenticate(_userName, _password))
                     {
-                        ApplyServerWebRoot(_htsConnection.GetWebRoot());
+                        ApplyServerWebRoot(connection.GetWebRoot());
+                        _connected = true;
+
+                        _logger.LogInformation(
+                            "[TVHclient] HTSConnectionHandler.ConnectionLoop: connection to {ServerAddress}:{Htspport} established; "
+                            + "TVH server = '{ServerName}' {ServerVersion}; HTSP version negotiated = {NegotiatedHtspVersion} "
+                            + "(server supports up to {ServerHtspVersion}, client up to {ClientHtspVersion})",
+                            _tvhServerName,
+                            _htspPort,
+                            connection.GetServername(),
+                            connection.GetServerversion(),
+                            connection.GetNegotiatedProtocolVersion(),
+                            connection.GetServerProtocolVersion(),
+                            HTSMessage.HtspVersion);
+                        return;
                     }
 
-                    _logger.LogInformation(
-                        "[TVHclient] HTSConnectionHandler.EnsureConnection: connection established = {Connected}; "
-                        + "TVH server = '{ServerName}' {ServerVersion}; HTSP version negotiated = {NegotiatedHtspVersion} "
-                        + "(server supports up to {ServerHtspVersion}, client up to {ClientHtspVersion})",
-                        _connected,
-                        _htsConnection.GetServername(),
-                        _htsConnection.GetServerversion(),
-                        _htsConnection.GetNegotiatedProtocolVersion(),
-                        _htsConnection.GetServerProtocolVersion(),
-                        HTSMessage.HtspVersion);
+                    _logger.LogError("[TVHclient] HTSConnectionHandler.ConnectionLoop: authentication failed");
+                    connection.Stop();
                 }
+                catch (Exception ex)
+                {
+                    _logger.LogError(
+                        "[TVHclient] HTSConnectionHandler.ConnectionLoop: can't connect to {ServerAddress}:{Htspport} - {Message}",
+                        _tvhServerName,
+                        _htspPort,
+                        ex.Message);
+                }
+                finally
+                {
+                    _firstConnectAttemptCompleted = true;
+                }
+
+                attempt++;
+                int delaySeconds = Math.Min(MaxRetryDelaySeconds, 5 << Math.Min(attempt - 1, 4));
+                _logger.LogDebug("[TVHclient] HTSConnectionHandler.ConnectionLoop: next connection attempt in {Delay}s", delaySeconds);
+                await Task.Delay(TimeSpan.FromSeconds(delaySeconds)).ConfigureAwait(false);
             }
         }
 
         public void SendMessage(HTSMessage message, IHTSResponseHandler responseHandler)
         {
-            EnsureConnection();
-            _htsConnection!.SendMessage(message, responseHandler);
+            StartConnectionLoop();
+
+            HTSConnectionAsync? connection = _htsConnection;
+            if (!_connected || connection == null)
+            {
+                throw new InvalidOperationException(
+                    "[TVHclient] HTSConnectionHandler.SendMessage: not connected to TVH server '" + _tvhServerName + ":" + _htspPort + "'");
+            }
+
+            connection.SendMessage(message, responseHandler);
         }
 
         /// <summary>
         /// Gets the HTSP version in effect for the current connection.
         /// </summary>
-        /// <returns>The negotiated HTSP version.</returns>
+        /// <returns>The negotiated HTSP version, or -1 while not connected.</returns>
         public int GetNegotiatedProtocolVersion()
         {
-            EnsureConnection();
-            return _htsConnection!.GetNegotiatedProtocolVersion();
+            StartConnectionLoop();
+            HTSConnectionAsync? connection = _htsConnection;
+            return (_connected && connection != null) ? connection.GetNegotiatedProtocolVersion() : -1;
         }
 
         public Task<IEnumerable<ChannelInfo>> BuildChannelInfos(CancellationToken cancellationToken)
@@ -395,9 +470,9 @@ namespace TVHeadEnd
 
         public string GetHttpBaseUrl()
         {
-            // The web root is taken from the HTSP handshake, so a connection is required
-            // before the base URL is known to be correct.
-            EnsureConnection();
+            // The web root is taken from the HTSP handshake, so the base URL is only
+            // final once connected; never block on an unreachable server here.
+            StartConnectionLoop();
             return _httpBaseUrl;
         }
 
@@ -431,11 +506,16 @@ namespace TVHeadEnd
         public void OnError(Exception ex)
         {
             _logger.LogError(ex, "[TVHclient] HTSConnectionHandler: HTSP error");
-            _htsConnection?.Stop();
-            _htsConnection = null;
-            _connected = false;
+            lock (_lock)
+            {
+                _htsConnection?.Stop();
+                _htsConnection = null;
+                _connected = false;
+                _initialLoadFinished = false;
+            }
+
             // _liveTvService.sendDataSourceChanged();
-            EnsureConnection();
+            StartConnectionLoop();
         }
 
         public void OnMessage(HTSMessage? response)

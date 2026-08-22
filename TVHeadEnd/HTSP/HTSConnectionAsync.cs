@@ -12,6 +12,10 @@ namespace TVHeadEnd.HTSP
 {
     public sealed class HTSConnectionAsync : IDisposable
     {
+        // Bounded wait for handshake responses so that a connection dying
+        // during the handshake can't block the caller forever.
+        private static readonly TimeSpan ResponseTimeout = TimeSpan.FromSeconds(20);
+
         private readonly object _lock;
         private readonly IHTSConnectionListener _listener;
         private readonly string _clientName;
@@ -116,7 +120,7 @@ namespace TVHeadEnd.HTSP
             return _needsRestart;
         }
 
-        public void Open(string hostname, int port)
+        public void Open(string hostname, int port, TimeSpan connectTimeout)
         {
             if (_connected)
             {
@@ -125,41 +129,46 @@ namespace TVHeadEnd.HTSP
 
             lock (_lock)
             {
-                while (!_connected)
+                // Establish the remote endpoint for the socket.
+                if (!IPAddress.TryParse(hostname, out IPAddress? ipAddress))
                 {
-                    try
-                    {
-                        // Establish the remote endpoint for the socket.
-                        if (!IPAddress.TryParse(hostname, out IPAddress? ipAddress))
-                        {
-                            // no IP --> ask DNS
-                            IPHostEntry ipHostInfo = Dns.GetHostEntry(hostname);
-                            ipAddress = ipHostInfo.AddressList[0];
-                        }
-
-                        IPEndPoint remoteEP = new IPEndPoint(ipAddress, port);
-
-                        _logger.LogDebug(
-                            "[TVHclient] HTSConnectionAsync.Open: IPEndPoint = '{IP}'; AddressFamily = '{AF}'",
-                            remoteEP.ToString(),
-                            ipAddress.AddressFamily);
-
-                        // Create a TCP/IP socket.
-                        _socket = new Socket(ipAddress.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
-
-                        // connect to server
-                        _socket.Connect(remoteEP);
-
-                        _connected = true;
-                        _logger.LogDebug("[TVHclient] HTSConnectionAsync.Open: socket connected");
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError(ex, "[TVHclient] HTSConnectionAsync.Open: exception caught");
-
-                        Thread.Sleep(2000);
-                    }
+                    // no IP --> ask DNS
+                    IPHostEntry ipHostInfo = Dns.GetHostEntry(hostname);
+                    ipAddress = ipHostInfo.AddressList[0];
                 }
+
+                IPEndPoint remoteEP = new IPEndPoint(ipAddress, port);
+
+                _logger.LogDebug(
+                    "[TVHclient] HTSConnectionAsync.Open: IPEndPoint = '{IP}'; AddressFamily = '{AF}'",
+                    remoteEP.ToString(),
+                    ipAddress.AddressFamily);
+
+                // Create a TCP/IP socket.
+                _socket = new Socket(ipAddress.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
+
+                // Detect a silently dead peer (e.g. remote server or VPN link
+                // gone away without RST/FIN) within ~90s instead of blocking
+                // in Receive() forever.
+                _socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
+                _socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveTime, 60);
+                _socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveInterval, 10);
+                _socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveRetryCount, 3);
+
+                // Connect to the server, but never wait longer than connectTimeout:
+                // when the host is unreachable a plain Connect() blocks for the
+                // full kernel TCP timeout (about 2 minutes on Linux).
+                IAsyncResult connectResult = _socket.BeginConnect(remoteEP, null, null);
+                if (!connectResult.AsyncWaitHandle.WaitOne(connectTimeout, true))
+                {
+                    _socket.Close();
+                    throw new TimeoutException("No response from '" + remoteEP + "' within " + connectTimeout.TotalSeconds + "s");
+                }
+
+                _socket.EndConnect(connectResult);
+
+                _connected = true;
+                _logger.LogDebug("[TVHclient] HTSConnectionAsync.Open: socket connected");
 
                 _receiveHandlerThread = StartBackgroundThread(ReceiveHandler);
                 _messageBuilderThread = StartBackgroundThread(MessageBuilder);
@@ -191,7 +200,7 @@ namespace TVHeadEnd.HTSP
 
             LoopBackResponseHandler loopBackResponseHandler = new LoopBackResponseHandler();
             SendMessage(helloMessage, loopBackResponseHandler);
-            HTSMessage helloResponse = loopBackResponseHandler.GetResponse();
+            HTSMessage? helloResponse = loopBackResponseHandler.GetResponse(ResponseTimeout);
             if (helloResponse != null)
             {
                 if (helloResponse.ContainsField("htspversion"))
@@ -245,7 +254,7 @@ namespace TVHeadEnd.HTSP
                 authMessage.PutField("username", username);
                 authMessage.PutField("digest", digest);
                 SendMessage(authMessage, loopBackResponseHandler);
-                HTSMessage authResponse = loopBackResponseHandler.GetResponse();
+                HTSMessage? authResponse = loopBackResponseHandler.GetResponse(ResponseTimeout);
                 if (authResponse != null)
                 {
                     bool auth = authResponse.GetInt("noaccess", 0) != 1;

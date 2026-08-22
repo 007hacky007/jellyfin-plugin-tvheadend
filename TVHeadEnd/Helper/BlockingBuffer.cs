@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Threading;
 
 namespace TVHeadEnd.Helper
@@ -50,6 +51,34 @@ namespace TVHeadEnd.Helper
                 }
 
                 return item;
+            }
+        }
+
+        public bool TryDequeue([MaybeNullWhen(false)] out T item, TimeSpan timeout)
+        {
+            DateTime deadline = DateTime.UtcNow + timeout;
+            lock (_queue)
+            {
+                while (_queue.Count == 0)
+                {
+                    TimeSpan remaining = deadline - DateTime.UtcNow;
+                    if (remaining <= TimeSpan.Zero)
+                    {
+                        item = default;
+                        return false;
+                    }
+
+                    Monitor.Wait(_queue, remaining);
+                }
+
+                item = _queue.Dequeue();
+                if (_queue.Count == _maxSize - 1)
+                {
+                    // wake up any blocked enqueue
+                    Monitor.PulseAll(_queue);
+                }
+
+                return true;
             }
         }
     }
