@@ -1,20 +1,17 @@
-name: "TVHeadend"
-guid: "3fd018e5-5e78-4e58-b280-a0c068febee0"
+name: "TVHeadend Fail-Fast"
+guid: "980dc09b-7127-4a6e-b101-b6ae374ea0cc"
 imageUrl: "https://repo.jellyfin.org/releases/plugin/images/jellyfin-plugin-tvheadend.png"
-version: 13
+version: 13.1
 targetAbi: "10.11.0.0"
 framework: "net9.0"
-owner: "jellyfin"
-overview: "Manage TVHeadend from Jellyfin"
-description: "Manage TVHeadend from Jellyfin"
+owner: "007hacky007"
+overview: "TVHeadend plugin fork that fails fast when the server is unreachable"
+description: "Provides live TV using TVHeadend as the source. Fork of the official plugin that stays responsive when the TVHeadend server is unreachable."
 category: "LiveTV"
 artifacts:
   - "TVHeadEnd.dll"
 changelog: |-
-  - Jellyfin 10.11 support (#100) @crobibero
-  - Restore subtitles and multiple audio that got destroyed in commit db8cd9af238813a7b141ba826168fdaa22f1509e on Feb 18, 2018 (#68) @roman-vanicek
-  - Further Release 10.9.x improvements (#92) @lomion0815
-  - Readme: update build requirements (#93) @citronalco
-  - Fixed link to TVHeadend image (#83) @lomion0815
-  - Set correct dates for recordings (#84) @lomion0815
-  - Changed HTSP field "summary" to correct name "subtitle". (#85) @lomion0815
+  - Fail fast when the TVH server is unreachable: connection runs in a background loop with a 10s connect timeout and exponential backoff, UI requests never block on a dead server
+  - TCP keepalive detects a silently dead peer (e.g. VPN link down) within ~90s
+  - Do not cache failed playback ticket requests (playback stayed broken after TVH recovered)
+  - Based on the official plugin version 13

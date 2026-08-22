@@ -44,7 +44,7 @@ namespace TVHeadEnd
         /// <value>The name.</value>
         public override string Name
         {
-            get { return "TVHeadend"; }
+            get { return "TVHeadend Fail-Fast"; }
         }
 
         /// <summary>
@@ -55,11 +55,11 @@ namespace TVHeadEnd
         {
             get
             {
-                return "Provides live TV using TVHeadend as the source.";
+                return "Provides live TV using TVHeadend as the source. Fork of the official plugin that stays responsive when the TVHeadend server is unreachable.";
             }
         }
 
-        private Guid _id = new Guid("3fd018e5-5e78-4e58-b280-a0c068febee0");
+        private Guid _id = new Guid("980dc09b-7127-4a6e-b101-b6ae374ea0cc");
         public override Guid Id
         {
             get { return _id; }
