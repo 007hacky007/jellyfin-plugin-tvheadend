@@ -9,6 +9,14 @@
     "imageUrl": "https://repo.jellyfin.org/releases/plugin/images/jellyfin-plugin-tvheadend.png",
     "versions": [
       {
+        "version": "13.1.1.0",
+        "changelog": "- Fix the plugin configuration page: it requested the configuration of the upstream plugin GUID, got 404 and stayed on the loading spinner forever\n- Configuration page now reports load/save errors instead of spinning silently",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/007hacky007/jellyfin-plugin-tvheadend/releases/download/v13.1.1.0/tvheadend-failfast_13.1.1.0.zip",
+        "checksum": "29d881a09ad6641ddcc416a4e9126760",
+        "timestamp": "2026-08-27T15:01:00Z"
+      },
+      {
         "version": "13.1.0.0",
         "changelog": "- Fail fast when the TVH server is unreachable: connection runs in a background loop with a 10s connect timeout and exponential backoff, UI requests never block on a dead server\n- TCP keepalive detects a silently dead peer (e.g. VPN link down) within ~90s\n- Do not cache failed playback ticket requests (playback stayed broken after TVH recovered)\n- Based on the official plugin version 13",
         "targetAbi": "10.11.0.0",
