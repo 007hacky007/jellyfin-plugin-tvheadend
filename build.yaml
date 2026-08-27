@@ -1,7 +1,7 @@
 name: "TVHeadend Fail-Fast"
 guid: "980dc09b-7127-4a6e-b101-b6ae374ea0cc"
 imageUrl: "https://repo.jellyfin.org/releases/plugin/images/jellyfin-plugin-tvheadend.png"
-version: 13.1
+version: 13.1.1
 targetAbi: "10.11.0.0"
 framework: "net9.0"
 owner: "007hacky007"
@@ -11,7 +11,6 @@ category: "LiveTV"
 artifacts:
   - "TVHeadEnd.dll"
 changelog: |-
-  - Fail fast when the TVH server is unreachable: connection runs in a background loop with a 10s connect timeout and exponential backoff, UI requests never block on a dead server
-  - TCP keepalive detects a silently dead peer (e.g. VPN link down) within ~90s
-  - Do not cache failed playback ticket requests (playback stayed broken after TVH recovered)
-  - Based on the official plugin version 13
+  - Fix the plugin configuration page: it requested the configuration of the upstream plugin GUID, got 404 and stayed on the loading spinner forever
+  - Configuration page now reports load/save errors instead of spinning silently
+  - 13.1.0.0: fail fast when the TVH server is unreachable (background connect loop with 10s timeout and backoff, UI requests never block on a dead server), TCP keepalive dead-peer detection, do not cache failed playback ticket requests
