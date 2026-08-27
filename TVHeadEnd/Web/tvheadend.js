@@ -2,6 +2,13 @@
     pluginUniqueId: '980dc09b-7127-4a6e-b101-b6ae374ea0cc'
 };
 
+function reportError(action, err) {
+    Dashboard.hideLoadingMsg();
+    const status = err && err.status ? ' (HTTP ' + err.status + ')' : '';
+    console.error('TVHeadend plugin: failed to ' + action + ' configuration', err);
+    Dashboard.alert('Failed to ' + action + ' TVHeadend plugin configuration' + status);
+}
+
 export default function (view, params) {
     view.addEventListener('viewshow', function () {
         Dashboard.showLoadingMsg();
@@ -21,6 +28,8 @@ export default function (view, params) {
             page.querySelector('#chkEnableSubsMaudios').checked = config.EnableSubsMaudios || false;
             page.querySelector('#chkForceDeinterlace').checked = config.ForceDeinterlace || false;
             Dashboard.hideLoadingMsg();
+        }).catch(function (err) {
+            reportError('load', err);
         });
     });
     view.querySelector('.TVHclientConfigurationForm').addEventListener('submit', function (e) {
@@ -41,7 +50,9 @@ export default function (view, params) {
             config.HideRecordingsChannel = form.querySelector('#chkHideRecordingsChannel').checked;
             config.EnableSubsMaudios = form.querySelector('#chkEnableSubsMaudios').checked;
             config.ForceDeinterlace = form.querySelector('#chkForceDeinterlace').checked;
-            ApiClient.updatePluginConfiguration(TVHclientConfigurationPageVar.pluginUniqueId, config).then(Dashboard.processPluginConfigurationUpdateResult);
+            return ApiClient.updatePluginConfiguration(TVHclientConfigurationPageVar.pluginUniqueId, config).then(Dashboard.processPluginConfigurationUpdateResult);
+        }).catch(function (err) {
+            reportError('save', err);
         });
         return false;
     });
