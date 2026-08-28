@@ -11,6 +11,8 @@ category: "LiveTV"
 artifacts:
   - "TVHeadEnd.dll"
 changelog: |-
+  - Channels without a channel number (TVHeadend reports 0) are no longer dropped; option "Include channels without a channel number" (default on) restores the old behaviour when unchecked
+  - Configuration page uses the fork's plugin GUID and reports load/save errors instead of spinning silently
   - Rebased on the official plugin version 15: Jellyfin 12 support, HTSP handling fixes across TVHeadend versions, series timers via autorec entries, web root taken from the server
   - Fail fast when the TVH server is unreachable: connection runs in a background loop with a 10s connect timeout and exponential backoff, UI requests never block on a dead server
   - TCP keepalive detects a silently dead peer (e.g. VPN link down) within ~90s
