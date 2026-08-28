@@ -1,7 +1,7 @@
 name: "TVHeadend Fail-Fast"
 guid: "980dc09b-7127-4a6e-b101-b6ae374ea0cc"
 imageUrl: "https://repo.jellyfin.org/releases/plugin/images/jellyfin-plugin-tvheadend.png"
-version: 13.1.1
+version: 13.1.2
 targetAbi: "10.11.0.0"
 framework: "net9.0"
 owner: "007hacky007"
@@ -11,6 +11,8 @@ category: "LiveTV"
 artifacts:
   - "TVHeadEnd.dll"
 changelog: |-
-  - Fix the plugin configuration page: it requested the configuration of the upstream plugin GUID, got 404 and stayed on the loading spinner forever
-  - Configuration page now reports load/save errors instead of spinning silently
+  - Channels without a channel number (TVHeadend reports 0) are no longer dropped; new option "Include channels without a channel number" (default on) restores the old behaviour when unchecked
+  - Fix the "channel type for Other" setting being ignored (it was applied before the configuration was read)
+  - 13.1.1.0: fix the plugin configuration page: it requested the configuration of the upstream plugin GUID, got 404 and stayed on the loading spinner forever
+  - 13.1.1.0: configuration page now reports load/save errors instead of spinning silently
   - 13.1.0.0: fail fast when the TVH server is unreachable (background connect loop with 10s timeout and backoff, UI requests never block on a dead server), TCP keepalive dead-peer detection, do not cache failed playback ticket requests
