@@ -9,6 +9,14 @@
     "imageUrl": "https://repo.jellyfin.org/releases/plugin/images/jellyfin-plugin-tvheadend.png",
     "versions": [
       {
+        "version": "15.1.0.0",
+        "changelog": "- Jellyfin 12 support: rebased on the official plugin version 15 (HTSP handling fixes across TVHeadend versions, series timers via autorec entries, web root taken from the server)\n- Fail-fast connection handling, the unnumbered-channels option and the configuration page fixes carried over from 13.1.x",
+        "targetAbi": "12.0.0.0",
+        "sourceUrl": "https://github.com/007hacky007/jellyfin-plugin-tvheadend/releases/download/v15.1.0.0/tvheadend-failfast_15.1.0.0.zip",
+        "checksum": "f52c968b50815f2ce4486cbfc547b582",
+        "timestamp": "2026-09-21T11:05:00Z"
+      },
+      {
         "version": "13.1.2.0",
         "changelog": "- Channels without a channel number (TVHeadend reports 0) are no longer dropped; new option \"Include channels without a channel number\" (default on)\n- Fix the \"channel type for Other\" setting being ignored",
         "targetAbi": "10.11.0.0",
