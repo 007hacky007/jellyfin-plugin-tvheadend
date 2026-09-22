@@ -1,7 +1,7 @@
 name: "TVHeadend Fail-Fast"
 guid: "980dc09b-7127-4a6e-b101-b6ae374ea0cc"
 imageUrl: "https://repo.jellyfin.org/releases/plugin/images/jellyfin-plugin-tvheadend.png"
-version: 15.1
+version: 15.1.1
 targetAbi: "12.0.0.0"
 framework: "net10.0"
 owner: "007hacky007"
@@ -11,6 +11,9 @@ category: "LiveTV"
 artifacts:
   - "TVHeadEnd.dll"
 changelog: |-
+  - Fix a guide refresh while TVHeadend is unreachable deleting all channels and EPG data from Jellyfin: the plugin now reports an error instead of an empty channel list, so existing data is kept
+  - Rejected credentials stop the reconnect loop for good, with a clear error in the log (unreachable servers keep being retried with backoff)
+  - A connection closed by the server is rebuilt on the next call; keepalive tuning failures no longer prevent connecting; the reconnect loop stops when the plugin is unloaded
   - Channels without a channel number (TVHeadend reports 0) are no longer dropped; option "Include channels without a channel number" (default on) restores the old behaviour when unchecked
   - Configuration page uses the fork's plugin GUID and reports load/save errors instead of spinning silently
   - Rebased on the official plugin version 15: Jellyfin 12 support, HTSP handling fixes across TVHeadend versions, series timers via autorec entries, web root taken from the server
