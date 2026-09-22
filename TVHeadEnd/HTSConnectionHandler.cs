@@ -40,6 +40,7 @@ namespace TVHeadEnd
         private static readonly TimeSpan _initialLoadTimeout = TimeSpan.FromMinutes(5);
 
         private readonly object _lock = new object();
+        private readonly CancellationTokenSource _connectionLoopCts = new CancellationTokenSource();
 
         private readonly ILoggerFactory _loggerFactory;
         private readonly ILogger<HTSConnectionHandler> _logger;
@@ -55,6 +56,7 @@ namespace TVHeadEnd
         private volatile bool _connected;
         private volatile bool _configured;
         private volatile bool _firstConnectAttemptCompleted;
+        private volatile bool _authenticationFailed;
 
         private Task? _connectionTask;
 
@@ -103,6 +105,11 @@ namespace TVHeadEnd
         public int WaitForInitialLoad(CancellationToken cancellationToken)
         {
             StartConnectionLoop();
+            if (_authenticationFailed)
+            {
+                return -1;
+            }
+
             DateTime deadline = DateTime.UtcNow + _initialLoadTimeout;
             while (!cancellationToken.IsCancellationRequested)
             {
@@ -331,34 +338,66 @@ namespace TVHeadEnd
         //    return stream;
         // }
 
+        /// <summary>
+        /// Describes why the server cannot be used right now, for exceptions raised towards Jellyfin.
+        /// </summary>
+        /// <returns>A human readable reason.</returns>
+        public string GetUnavailableReason()
+        {
+            if (_authenticationFailed)
+            {
+                return "authentication with TVHeadend server '" + _tvhServerName + ":" + _htspPort
+                    + "' failed; the plugin will not reconnect until Jellyfin is restarted";
+            }
+
+            return "TVHeadend server '" + _tvhServerName + ":" + _htspPort + "' is unreachable or has not finished the initial sync";
+        }
+
         private void StartConnectionLoop()
         {
             Init();
 
             lock (_lock)
             {
+                if (_authenticationFailed || _connectionLoopCts.IsCancellationRequested)
+                {
+                    return;
+                }
+
+                // A connection the server closed gracefully is only flagged via NeedsRestart()
+                // (Stop() without OnError), so it has to be picked up here as well.
+                if (_connected && _htsConnection != null && _htsConnection.NeedsRestart())
+                {
+                    _logger.LogWarning("[TVHclient] HTSConnectionHandler.StartConnectionLoop: connection was closed, reconnecting");
+                    _connected = false;
+                    _initialLoadFinished = false;
+                    _firstConnectAttemptCompleted = false;
+                }
+
                 if (_connected || (_connectionTask != null && !_connectionTask.IsCompleted))
                 {
                     return;
                 }
 
-                _connectionTask = Task.Run(() => ConnectionLoop());
+                _connectionTask = Task.Run(() => ConnectionLoop(_connectionLoopCts.Token));
             }
         }
 
-        private async Task ConnectionLoop()
+        private async Task ConnectionLoop(CancellationToken cancellationToken)
         {
             int attempt = 0;
-            while (!_connected)
+            while (!_connected && !cancellationToken.IsCancellationRequested)
             {
+                HTSConnectionAsync? connection = null;
                 try
                 {
-                    HTSConnectionAsync connection;
                     lock (_lock)
                     {
                         if (_htsConnection == null || _htsConnection.NeedsRestart())
                         {
                             _logger.LogDebug("[TVHclient] HTSConnectionHandler.ConnectionLoop: create new HTS connection");
+                            _htsConnection?.Dispose();
+
                             // "clientversion" is the client's own version, not the protocol version -
                             // TVHeadend only reports it, but sending the HTSP number here was misleading.
                             Version? version = typeof(HTSConnectionHandler).Assembly.GetName().Version;
@@ -404,8 +443,23 @@ namespace TVHeadEnd
                         return;
                     }
 
-                    _logger.LogError("[TVHclient] HTSConnectionHandler.ConnectionLoop: authentication failed");
-                    connection.Stop();
+                    // Rejected credentials do not fix themselves, unlike an unreachable
+                    // server: stop trying until the configuration is corrected and
+                    // Jellyfin is restarted, instead of hammering the server forever.
+                    lock (_lock)
+                    {
+                        _authenticationFailed = true;
+                        _htsConnection = null;
+                    }
+
+                    connection.Dispose();
+                    _logger.LogError(
+                        "[TVHclient] HTSConnectionHandler.ConnectionLoop: TVHeadend server {ServerAddress}:{Htspport} rejected the credentials of user '{User}'. "
+                        + "Giving up: Live TV stays unavailable until the username and password in the plugin configuration are corrected and Jellyfin is restarted",
+                        _tvhServerName,
+                        _htspPort,
+                        _userName);
+                    return;
                 }
                 catch (Exception ex)
                 {
@@ -414,6 +468,10 @@ namespace TVHeadEnd
                         _tvhServerName,
                         _htspPort,
                         ex.Message);
+
+                    // Close whatever the failed attempt left behind (socket, reader threads);
+                    // NeedsRestart() then makes the next attempt build a fresh connection.
+                    connection?.Stop();
                 }
                 finally
                 {
@@ -423,7 +481,14 @@ namespace TVHeadEnd
                 attempt++;
                 int delaySeconds = Math.Min(MaxRetryDelaySeconds, 5 << Math.Min(attempt - 1, 4));
                 _logger.LogDebug("[TVHclient] HTSConnectionHandler.ConnectionLoop: next connection attempt in {Delay}s", delaySeconds);
-                await Task.Delay(TimeSpan.FromSeconds(delaySeconds)).ConfigureAwait(false);
+                try
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(delaySeconds), cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    return;
+                }
             }
         }
 
@@ -434,8 +499,7 @@ namespace TVHeadEnd
             HTSConnectionAsync? connection = _htsConnection;
             if (!_connected || connection == null)
             {
-                throw new InvalidOperationException(
-                    "[TVHclient] HTSConnectionHandler.SendMessage: not connected to TVH server '" + _tvhServerName + ":" + _htspPort + "'");
+                throw new InvalidOperationException("[TVHclient] HTSConnectionHandler.SendMessage: " + GetUnavailableReason());
             }
 
             connection.SendMessage(message, responseHandler);
@@ -509,10 +573,20 @@ namespace TVHeadEnd
             _logger.LogError(ex, "[TVHclient] HTSConnectionHandler: HTSP error");
             lock (_lock)
             {
-                _htsConnection?.Stop();
+                if (_htsConnection == null)
+                {
+                    // Error of a connection that has already been torn down.
+                    return;
+                }
+
+                _htsConnection.Dispose();
                 _htsConnection = null;
                 _connected = false;
                 _initialLoadFinished = false;
+
+                // Let callers wait for the reconnect attempt instead of failing
+                // immediately on the stale result of the previous one.
+                _firstConnectAttemptCompleted = false;
             }
 
             // _liveTvService.sendDataSourceChanged();
@@ -606,15 +680,21 @@ namespace TVHeadEnd
         }
 
         /// <summary>
-        /// Releases the HTSP connection held by this handler.
+        /// Stops the reconnect loop and releases the HTSP connection held by this handler.
         /// </summary>
         /// <param name="disposing"><c>true</c> to release managed resources.</param>
         protected virtual void Dispose(bool disposing)
         {
             if (disposing)
             {
-                _htsConnection?.Dispose();
-                _htsConnection = null;
+                _connectionLoopCts.Cancel();
+                lock (_lock)
+                {
+                    _htsConnection?.Dispose();
+                    _htsConnection = null;
+                }
+
+                _connectionLoopCts.Dispose();
             }
         }
     }

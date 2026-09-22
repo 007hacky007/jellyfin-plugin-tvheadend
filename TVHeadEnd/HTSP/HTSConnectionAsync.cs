@@ -149,11 +149,19 @@ namespace TVHeadEnd.HTSP
 
                 // Detect a silently dead peer (e.g. remote server or VPN link
                 // gone away without RST/FIN) within ~90s instead of blocking
-                // in Receive() forever.
-                _socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
-                _socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveTime, 60);
-                _socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveInterval, 10);
-                _socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveRetryCount, 3);
+                // in Receive() forever. Not every platform supports the tuning
+                // options, and a missing keepalive must not prevent connecting.
+                try
+                {
+                    _socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
+                    _socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveTime, 60);
+                    _socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveInterval, 10);
+                    _socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveRetryCount, 3);
+                }
+                catch (SocketException ex)
+                {
+                    _logger.LogWarning(ex, "[TVHclient] HTSConnectionAsync.Open: TCP keepalive not available, a silently dead peer will not be detected");
+                }
 
                 // Connect to the server, but never wait longer than connectTimeout:
                 // when the host is unreachable a plain Connect() blocks for the
@@ -187,6 +195,13 @@ namespace TVHeadEnd.HTSP
             return thread;
         }
 
+        /// <summary>
+        /// Performs the HTSP hello/authenticate handshake.
+        /// </summary>
+        /// <param name="username">The TVHeadend user name.</param>
+        /// <param name="password">The TVHeadend password.</param>
+        /// <returns><c>true</c> if the server accepted the credentials, <c>false</c> if it rejected them.</returns>
+        /// <exception cref="TimeoutException">The server did not answer a handshake message in time.</exception>
         public bool Authenticate(string username, string password)
         {
             _logger.LogDebug("[TVHclient] HTSConnectionAsync.authenticate: start");
@@ -201,77 +216,78 @@ namespace TVHeadEnd.HTSP
             LoopBackResponseHandler loopBackResponseHandler = new LoopBackResponseHandler();
             SendMessage(helloMessage, loopBackResponseHandler);
             HTSMessage? helloResponse = loopBackResponseHandler.GetResponse(ResponseTimeout);
-            if (helloResponse != null)
+            if (helloResponse == null)
             {
-                if (helloResponse.ContainsField("htspversion"))
-                {
-                    _serverProtocolVersion = helloResponse.GetInt("htspversion");
-                }
-                else
-                {
-                    _serverProtocolVersion = -1;
-                    _logger.LogDebug("[TVHclient] HTSConnectionAsync.authenticate: hello didn't include required field 'htspversion' - htsp incorrectly implemented by tvheadend");
-                }
-
-                // TVHeadend only sends "webroot" when it is actually configured behind a
-                // path prefix; its absence means the server is served from the root.
-                _webRoot = helloResponse.GetString("webroot", null);
-
-                if (helloResponse.ContainsField("servername"))
-                {
-                    _servername = helloResponse.GetString("servername");
-                }
-                else
-                {
-                    _servername = "n/a";
-                    _logger.LogDebug("[TVHclient] HTSConnectionAsync.authenticate: hello didn't include required field 'servername' - htsp incorrectly implemented by tvheadend");
-                }
-
-                if (helloResponse.ContainsField("serverversion"))
-                {
-                    _serverversion = helloResponse.GetString("serverversion");
-                }
-                else
-                {
-                    _serverversion = "n/a";
-                    _logger.LogDebug("[TVHclient] HTSConnectionAsync.authenticate: hello didn't include required field 'serverversion' - htsp incorrectly implemented by tvheadend");
-                }
-
-                byte[] salt;
-                if (helloResponse.ContainsField("challenge"))
-                {
-                    salt = helloResponse.GetByteArray("challenge");
-                }
-                else
-                {
-                    salt = Array.Empty<byte>();
-                    _logger.LogInformation("[TVHclient] HTSConnectionAsync.authenticate: hello didn't include required field 'challenge' - htsp incorrectly implemented by tvheadend");
-                }
-
-                byte[] digest = SHA1Helper.GenerateSaltedSHA1(password, salt);
-                HTSMessage authMessage = new HTSMessage();
-                authMessage.Method = "authenticate";
-                authMessage.PutField("username", username);
-                authMessage.PutField("digest", digest);
-                SendMessage(authMessage, loopBackResponseHandler);
-                HTSMessage? authResponse = loopBackResponseHandler.GetResponse(ResponseTimeout);
-                if (authResponse != null)
-                {
-                    bool auth = authResponse.GetInt("noaccess", 0) != 1;
-                    if (auth)
-                    {
-                        HTSMessage enableAsyncMetadataMessage = new HTSMessage();
-                        enableAsyncMetadataMessage.Method = "enableAsyncMetadata";
-                        SendMessage(enableAsyncMetadataMessage, null);
-                    }
-
-                    _logger.LogDebug("[TVHclient] HTSConnectionAsync.authenticate: authenticated = {M}", auth);
-                    return auth;
-                }
+                throw new TimeoutException("No response to 'hello' within " + ResponseTimeout.TotalSeconds + "s");
             }
 
-            _logger.LogError("[TVHclient] HTSConnectionAsync.authenticate: no hello response");
-            return false;
+            if (helloResponse.ContainsField("htspversion"))
+            {
+                _serverProtocolVersion = helloResponse.GetInt("htspversion");
+            }
+            else
+            {
+                _serverProtocolVersion = -1;
+                _logger.LogDebug("[TVHclient] HTSConnectionAsync.authenticate: hello didn't include required field 'htspversion' - htsp incorrectly implemented by tvheadend");
+            }
+
+            // TVHeadend only sends "webroot" when it is actually configured behind a
+            // path prefix; its absence means the server is served from the root.
+            _webRoot = helloResponse.GetString("webroot", null);
+
+            if (helloResponse.ContainsField("servername"))
+            {
+                _servername = helloResponse.GetString("servername");
+            }
+            else
+            {
+                _servername = "n/a";
+                _logger.LogDebug("[TVHclient] HTSConnectionAsync.authenticate: hello didn't include required field 'servername' - htsp incorrectly implemented by tvheadend");
+            }
+
+            if (helloResponse.ContainsField("serverversion"))
+            {
+                _serverversion = helloResponse.GetString("serverversion");
+            }
+            else
+            {
+                _serverversion = "n/a";
+                _logger.LogDebug("[TVHclient] HTSConnectionAsync.authenticate: hello didn't include required field 'serverversion' - htsp incorrectly implemented by tvheadend");
+            }
+
+            byte[] salt;
+            if (helloResponse.ContainsField("challenge"))
+            {
+                salt = helloResponse.GetByteArray("challenge");
+            }
+            else
+            {
+                salt = Array.Empty<byte>();
+                _logger.LogInformation("[TVHclient] HTSConnectionAsync.authenticate: hello didn't include required field 'challenge' - htsp incorrectly implemented by tvheadend");
+            }
+
+            byte[] digest = SHA1Helper.GenerateSaltedSHA1(password, salt);
+            HTSMessage authMessage = new HTSMessage();
+            authMessage.Method = "authenticate";
+            authMessage.PutField("username", username);
+            authMessage.PutField("digest", digest);
+            SendMessage(authMessage, loopBackResponseHandler);
+            HTSMessage? authResponse = loopBackResponseHandler.GetResponse(ResponseTimeout);
+            if (authResponse == null)
+            {
+                throw new TimeoutException("No response to 'authenticate' within " + ResponseTimeout.TotalSeconds + "s");
+            }
+
+            bool auth = authResponse.GetInt("noaccess", 0) != 1;
+            if (auth)
+            {
+                HTSMessage enableAsyncMetadataMessage = new HTSMessage();
+                enableAsyncMetadataMessage.Method = "enableAsyncMetadata";
+                SendMessage(enableAsyncMetadataMessage, null);
+            }
+
+            _logger.LogDebug("[TVHclient] HTSConnectionAsync.authenticate: authenticated = {M}", auth);
+            return auth;
         }
 
         /// <summary>
@@ -368,6 +384,12 @@ namespace TVHeadEnd.HTSP
                 catch (Exception ex)
                 {
                     threadOk = false;
+                    if (_sendingHandlerThreadTokenSource.IsCancellationRequested || !_connected)
+                    {
+                        // Stop() closed the socket on purpose; not an error to report.
+                        return;
+                    }
+
                     _logger.LogError(ex, "[TVHclient] HTSConnectionAsync.SendingHandler: exception caught");
                     if (_listener != null)
                     {
@@ -406,6 +428,12 @@ namespace TVHeadEnd.HTSP
                 catch (Exception ex)
                 {
                     threadOk = false;
+                    if (_receiveHandlerThreadTokenSource.IsCancellationRequested || !_connected)
+                    {
+                        // Stop() closed the socket on purpose; not an error to report.
+                        return;
+                    }
+
                     if (_listener != null)
                     {
                         Task.Run(() => _listener.OnError(ex));

@@ -384,10 +384,13 @@ namespace TVHeadEnd
         public async Task<IEnumerable<ChannelInfo>> GetChannelsAsync(CancellationToken cancellationToken)
         {
             int timeOut = await WaitForInitialLoadTask(cancellationToken).ConfigureAwait(false);
-            if (timeOut == -1 || cancellationToken.IsCancellationRequested)
+            cancellationToken.ThrowIfCancellationRequested();
+            if (timeOut == -1)
             {
-                _logger.LogError("LiveTvService.GetChannelsAsync: call cancelled or timed out - returning empty list");
-                return new List<ChannelInfo>();
+                // Jellyfin treats the returned list as the complete lineup and deletes every
+                // channel and program missing from it. Throwing instead makes the guide refresh
+                // keep the existing data until the server is back.
+                throw new InvalidOperationException("LiveTvService.GetChannelsAsync: " + _htsConnectionHandler.GetUnavailableReason());
             }
 
             TaskWithTimeoutRunner<IEnumerable<ChannelInfo>> twtr = new TaskWithTimeoutRunner<IEnumerable<ChannelInfo>>(_timeout);
@@ -657,10 +660,11 @@ namespace TVHeadEnd
         public async Task<IEnumerable<ProgramInfo>> GetProgramsAsync(string channelId, DateTime startDateUtc, DateTime endDateUtc, CancellationToken cancellationToken)
         {
             int timeOut = await WaitForInitialLoadTask(cancellationToken).ConfigureAwait(false);
-            if (timeOut == -1 || cancellationToken.IsCancellationRequested)
+            cancellationToken.ThrowIfCancellationRequested();
+            if (timeOut == -1)
             {
-                _logger.LogDebug("LiveTvService.GetProgramsAsync: call cancelled or timed out - returning empty list");
-                return new List<ProgramInfo>();
+                // Same as in GetChannelsAsync: an empty result would erase the channel's programs.
+                throw new InvalidOperationException("LiveTvService.GetProgramsAsync: " + _htsConnectionHandler.GetUnavailableReason());
             }
 
             GetEventsResponseHandler currGetEventsResponseHandler = new GetEventsResponseHandler(startDateUtc, endDateUtc, _logger, cancellationToken);
