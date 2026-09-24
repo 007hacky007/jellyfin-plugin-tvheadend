@@ -112,7 +112,7 @@ public class ConnectionTests
         AssertWorkersStopped(old);
         server.Sync = true;
         await Until(() => server.ConnectionCount >= 2);
-        Assert.Equal(0, await Task.Run(() => handler.WaitForInitialLoad(CancellationToken.None)).WaitAsync(Deadline));
+        await AssertSynced(handler);
     }
 
     [Fact]
@@ -197,7 +197,7 @@ public class ConnectionTests
     }
 
     [Fact]
-    public async Task RejectedCredentialsStopPermanentlyAndLogOnce()
+    public async Task RejectedCredentialsStopUntilConfigurationChanges()
     {
         await using var server = new Peer { Reject = true };
         Configure(server.Port);
@@ -211,6 +211,12 @@ public class ConnectionTests
         server.Reject = false;
         Assert.Equal(-1, handler.WaitForInitialLoad(CancellationToken.None));
         Assert.Equal(1, server.ConnectionCount);
+
+        // Changing the rejected settings re-arms the loop without a restart.
+        Plugin.Instance.Configuration.Password = "corrected";
+        Assert.Equal(0, await Task.Run(() => handler.WaitForInitialLoad(CancellationToken.None)).WaitAsync(Deadline));
+        Assert.Equal(2, server.ConnectionCount);
+        Assert.False(Get<bool>(handler, "_authenticationFailed"));
     }
 
     [Fact]
@@ -227,7 +233,7 @@ public class ConnectionTests
         await Until(() => WorkersStopped(old));
         server.IgnoreHello = false;
         await Until(() => server.ConnectionCount >= 2);
-        Assert.Equal(0, await Task.Run(() => handler.WaitForInitialLoad(CancellationToken.None)).WaitAsync(Deadline));
+        await AssertSynced(handler);
     }
 
     [Fact]
@@ -252,7 +258,7 @@ public class ConnectionTests
         server.Sync = true;
         await Until(() => server.ConnectionCount >= 2);
         Assert.True(Stopwatch.GetElapsedTime(failedAt) >= TimeSpan.FromSeconds(4));
-        Assert.Equal(0, await Task.Run(() => handler.WaitForInitialLoad(CancellationToken.None)).WaitAsync(Deadline));
+        await AssertSynced(handler);
     }
 
     [Fact]
@@ -269,9 +275,13 @@ public class ConnectionTests
         logs.Release.Set();
         Assert.Equal(-1, await waiting.WaitAsync(Deadline));
         var failedAt = Stopwatch.GetTimestamp();
+
+        // Retries of a failed attempt are not awaited: callers fail fast during the backoff.
+        Assert.Equal(-1, handler.WaitForInitialLoad(CancellationToken.None));
+        Assert.True(Stopwatch.GetElapsedTime(failedAt) < TimeSpan.FromSeconds(1));
         await Until(() => server.ConnectionCount >= 2);
         Assert.True(Stopwatch.GetElapsedTime(failedAt) >= TimeSpan.FromSeconds(4));
-        Assert.Equal(0, await Task.Run(() => handler.WaitForInitialLoad(CancellationToken.None)).WaitAsync(Deadline));
+        await AssertSynced(handler);
     }
 
     [Fact]
@@ -300,7 +310,7 @@ public class ConnectionTests
             var pending = Get<Dictionary<int, long>>(connection, "_responseStarted");
             foreach (int sequence in pending.Keys.ToArray())
             {
-                pending[sequence] = Stopwatch.GetTimestamp() - (30 * Stopwatch.Frequency);
+                pending[sequence] = Stopwatch.GetTimestamp() - (150 * Stopwatch.Frequency);
             }
         }
 
@@ -339,7 +349,7 @@ public class ConnectionTests
         first.CloseClients();
         Assert.Equal(-1, await waiting.WaitAsync(Deadline));
         await replacement.Accepted.Task.WaitAsync(Deadline);
-        Assert.Equal(0, await Task.Run(() => handler.WaitForInitialLoad(CancellationToken.None)).WaitAsync(Deadline));
+        await AssertSynced(handler);
     }
 
     [Fact]
@@ -352,6 +362,11 @@ public class ConnectionTests
         var old = await CurrentConnection(handler);
         server.CloseClients();
         await Until(old.NeedsRestart);
+        var droppedAt = Stopwatch.GetTimestamp();
+
+        // The reconnect after a working session is immediate (no backoff) and awaited.
+        Assert.Equal(0, await Task.Run(() => handler.WaitForInitialLoad(CancellationToken.None)).WaitAsync(Deadline));
+        Assert.True(Stopwatch.GetElapsedTime(droppedAt) < TimeSpan.FromSeconds(4));
         await Until(() => server.ConnectionCount >= 2);
         await Until(() => Get<bool>(handler, "_initialLoadFinished"));
         Assert.NotSame(old, await CurrentConnection(handler));
@@ -417,6 +432,12 @@ public class ConnectionTests
 
         typeof(Plugin).GetField("<Instance>k__BackingField", BindingFlags.Static | BindingFlags.NonPublic)!.SetValue(null, plugin);
         Assert.Same(config, Plugin.Instance.Configuration);
+    }
+
+    private static async Task AssertSynced(HTSConnectionHandler handler)
+    {
+        await Until(() => Get<bool>(handler, "_initialLoadFinished"));
+        Assert.Equal(0, handler.WaitForInitialLoad(CancellationToken.None));
     }
 
     private static T Get<T>(object value, string name) => (T)value.GetType().GetField(name, Fields)!.GetValue(value)!;

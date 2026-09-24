@@ -665,7 +665,9 @@ namespace TVHeadEnd
             cancellationToken.ThrowIfCancellationRequested();
             if (timeOut == -1)
             {
-                // Same as in GetChannelsAsync: an empty result would erase the channel's programs.
+                // Same as in GetChannelsAsync. Jellyfin 12.1 and later keep the channel's existing
+                // programs when this throws; older servers clean them up either way, so throwing
+                // is never worse than the empty list was.
                 throw new InvalidOperationException("LiveTvService.GetProgramsAsync: " + _htsConnectionHandler.GetUnavailableReason());
             }
 
