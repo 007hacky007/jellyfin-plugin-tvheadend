@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
+using System.Net.Sockets;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -390,10 +391,12 @@ namespace TVHeadEnd
                 }
 
                 InitConfiguration();
-                if (_connectionTask == null)
+                if (_connectionTask == null || _connectionTask.IsCompleted)
                 {
                     // One owner remains alive through connection, sync, service and backoff.
-                    // A disconnect cannot race a successful task's completion anymore.
+                    // A disconnect cannot race a successful task's completion anymore. The
+                    // loop only ends on shutdown or rejected credentials, both gated above,
+                    // so a completed task here is unexpected and simply gets replaced.
                     CancellationToken token = _connectionLoopCts.Token;
                     _connectionTask = Task.Run(() => ConnectionLoop(token), CancellationToken.None);
                 }
@@ -406,10 +409,10 @@ namespace TVHeadEnd
             while (!cancellationToken.IsCancellationRequested)
             {
                 HTSConnectionAsync? connection = null;
+                string hostname = _tvhServerName;
+                int port = _htspPort;
                 try
                 {
-                    string hostname;
-                    int port;
                     string username;
                     string password;
                     lock (_lock)
@@ -450,7 +453,7 @@ namespace TVHeadEnd
 
                         _logger.LogError(
                             "[TVHclient] HTSConnectionHandler.ConnectionLoop: TVHeadend server {ServerAddress}:{Htspport} rejected the credentials of user '{User}'. "
-                            + "Giving up until Jellyfin is restarted",
+                            + "Giving up: Live TV stays unavailable until the username and password in the plugin configuration are corrected and Jellyfin is restarted",
                             hostname,
                             port,
                             username);
@@ -512,12 +515,23 @@ namespace TVHeadEnd
                 {
                     return;
                 }
+                catch (Exception) when (cancellationToken.IsCancellationRequested)
+                {
+                    // Shutting down; the finally block releases the attempt.
+                }
+                catch (Exception ex) when (ex is TimeoutException or IOException or SocketException or OperationCanceledException)
+                {
+                    // Expected while the server is down or unresponsive: one line per
+                    // attempt, no stack trace, the root cause instead of the buffer wrapper.
+                    _logger.LogError(
+                        "[TVHclient] HTSConnectionHandler.ConnectionLoop: can't connect to {ServerAddress}:{Htspport} - {Message}",
+                        hostname,
+                        port,
+                        ex.GetBaseException().Message);
+                }
                 catch (Exception ex)
                 {
-                    if (!cancellationToken.IsCancellationRequested)
-                    {
-                        _logger.LogError(ex, "[TVHclient] HTSConnectionHandler.ConnectionLoop: connection attempt failed");
-                    }
+                    _logger.LogError(ex, "[TVHclient] HTSConnectionHandler.ConnectionLoop: connection attempt to {ServerAddress}:{Htspport} failed", hostname, port);
                 }
                 finally
                 {
