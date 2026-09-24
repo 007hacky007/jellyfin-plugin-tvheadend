@@ -393,7 +393,7 @@ namespace TVHeadEnd.HTSP
                     _logger.LogError(ex, "[TVHclient] HTSConnectionAsync.SendingHandler: exception caught");
                     if (_listener != null)
                     {
-                        _listener.OnError(ex);
+                        _listener.OnError(this, ex);
                     }
                     else
                     {
@@ -436,7 +436,7 @@ namespace TVHeadEnd.HTSP
 
                     if (_listener != null)
                     {
-                        Task.Run(() => _listener.OnError(ex));
+                        Task.Run(() => _listener.OnError(this, ex));
                     }
                     else
                     {
@@ -472,7 +472,7 @@ namespace TVHeadEnd.HTSP
                     threadOk = false;
                     if (_listener != null)
                     {
-                        _listener.OnError(ex);
+                        _listener.OnError(this, ex);
                     }
                     else
                     {
@@ -525,7 +525,7 @@ namespace TVHeadEnd.HTSP
                     threadOk = false;
                     if (_listener != null)
                     {
-                        _listener.OnError(ex);
+                        _listener.OnError(this, ex);
                     }
                     else
                     {
