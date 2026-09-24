@@ -399,9 +399,10 @@ namespace TVHeadEnd
 
             if (twtRes.HasTimeout)
             {
-                return new List<ChannelInfo>();
+                throw new TimeoutException("LiveTvService.GetChannelsAsync: channel list construction timed out");
             }
 
+            cancellationToken.ThrowIfCancellationRequested();
             var list = twtRes.Result.ToList();
 
             foreach (var channel in list)
@@ -412,6 +413,7 @@ namespace TVHeadEnd
                 }
             }
 
+            cancellationToken.ThrowIfCancellationRequested();
             return list;
         }
 
@@ -683,8 +685,7 @@ namespace TVHeadEnd
 
             if (twtRes.HasTimeout)
             {
-                _logger.LogDebug("LiveTvService.GetProgramsAsync: timeout reached while calling for events of channel '{Chanid}'", channelId);
-                return new List<ProgramInfo>();
+                throw new TimeoutException("LiveTvService.GetProgramsAsync: event request timed out");
             }
 
             var programs = twtRes.Result.ToList();
@@ -697,6 +698,7 @@ namespace TVHeadEnd
                 program.HasImage = !string.IsNullOrEmpty(program.ImageUrl);
             }
 
+            cancellationToken.ThrowIfCancellationRequested();
             return programs;
         }
 

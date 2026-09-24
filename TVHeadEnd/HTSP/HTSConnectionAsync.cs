@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
 using System.Net;
 using System.Net.Sockets;
 using System.Threading;
@@ -28,14 +30,15 @@ namespace TVHeadEnd.HTSP
         private readonly BlockingBuffer<HTSMessage> _messagesForSendQueue;
         private readonly Dictionary<int, IHTSResponseHandler?> _responseHandlers;
 
-        private readonly CancellationTokenSource _receiveHandlerThreadTokenSource;
-        private readonly CancellationTokenSource _messageBuilderThreadTokenSource;
-        private readonly CancellationTokenSource _sendingHandlerThreadTokenSource;
-        private readonly CancellationTokenSource _messageDistributorThreadTokenSource;
+        private readonly CancellationTokenSource _stopCts = new CancellationTokenSource();
+        private readonly Dictionary<int, long> _responseStarted = new Dictionary<int, long>();
+        private bool _opening;
+        private bool _opened;
+        private bool _disposed;
 
         private volatile bool _needsRestart;
         private volatile bool _connected;
-        private volatile int _seq;
+        private int _seq;
 
         private int _serverProtocolVersion;
         private string? _servername;
@@ -65,54 +68,59 @@ namespace TVHeadEnd.HTSP
             _receivedMessagesQueue = new BlockingBuffer<HTSMessage>(int.MaxValue);
             _messagesForSendQueue = new BlockingBuffer<HTSMessage>(int.MaxValue);
             _responseHandlers = new Dictionary<int, IHTSResponseHandler?>();
-
-            _receiveHandlerThreadTokenSource = new CancellationTokenSource();
-            _messageBuilderThreadTokenSource = new CancellationTokenSource();
-            _sendingHandlerThreadTokenSource = new CancellationTokenSource();
-            _messageDistributorThreadTokenSource = new CancellationTokenSource();
         }
 
         public void Stop()
         {
-            try
+            Stop(new IOException("The HTSP connection was stopped"));
+        }
+
+        private bool Stop(Exception error)
+        {
+            lock (_lock)
             {
-                if (_receiveHandlerThread != null && _receiveHandlerThread.IsAlive)
+                if (_needsRestart)
                 {
-                    _receiveHandlerThreadTokenSource.Cancel();
+                    return false;
                 }
 
-                if (_messageBuilderThread != null && _messageBuilderThread.IsAlive)
+                _needsRestart = true;
+                _connected = false;
+                _stopCts.Cancel();
+                _buffer.Close();
+                _receivedMessagesQueue.Close(error);
+                _messagesForSendQueue.Close(error);
+
+                // Wake socket operations before joining the workers. Dispose the socket
+                // only after Open and all workers have finished using it.
+                try
                 {
-                    _messageBuilderThreadTokenSource.Cancel();
+                    _socket?.Shutdown(SocketShutdown.Both);
+                }
+                catch (SocketException)
+                {
+                    // Connecting and already-disconnected sockets cannot be shut down.
                 }
 
-                if (_sendingHandlerThread != null && _sendingHandlerThread.IsAlive)
+                foreach (IHTSResponseHandler? handler in _responseHandlers.Values)
                 {
-                    _sendingHandlerThreadTokenSource.Cancel();
+                    handler?.HandleError(error);
                 }
 
-                if (_messageDistributorThread != null && _messageDistributorThread.IsAlive)
-                {
-                    _messageDistributorThreadTokenSource.Cancel();
-                }
+                _responseHandlers.Clear();
+                _responseStarted.Clear();
+                return true;
             }
-            catch
+        }
+
+        private void ReportError(Exception error)
+        {
+            if (Stop(error))
             {
+                // Never call the listener while holding the connection lock: API calls
+                // acquire the handler lock before accepting a request on this connection.
+                _listener.OnError(this, error);
             }
-
-            try
-            {
-                if (_socket != null && _socket.Connected)
-                {
-                    _socket.Close();
-                }
-            }
-            catch
-            {
-            }
-
-            _needsRestart = true;
-            _connected = false;
         }
 
         public bool NeedsRestart()
@@ -120,68 +128,99 @@ namespace TVHeadEnd.HTSP
             return _needsRestart;
         }
 
-        public void Open(string hostname, int port, TimeSpan connectTimeout)
+        public bool HasTimedOutResponse()
         {
-            if (_connected)
-            {
-                return;
-            }
-
             lock (_lock)
             {
-                // Establish the remote endpoint for the socket.
+                foreach (long started in _responseStarted.Values)
+                {
+                    if (Stopwatch.GetElapsedTime(started) >= ResponseTimeout)
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+        }
+
+        public void Open(string hostname, int port, TimeSpan connectTimeout)
+        {
+            lock (_lock)
+            {
+                ObjectDisposedException.ThrowIf(_disposed, this);
+                if (_needsRestart || _opened)
+                {
+                    throw new InvalidOperationException("An HTSP connection can only be opened once");
+                }
+
+                _opened = true;
+                _opening = true;
+            }
+
+            try
+            {
+                long started = Stopwatch.GetTimestamp();
                 if (!IPAddress.TryParse(hostname, out IPAddress? ipAddress))
                 {
-                    // no IP --> ask DNS
-                    IPHostEntry ipHostInfo = Dns.GetHostEntry(hostname);
-                    ipAddress = ipHostInfo.AddressList[0];
+                    // DNS is part of the attempt deadline and must not hold up shutdown.
+                    IPAddress[] addresses = Dns.GetHostAddressesAsync(hostname, _stopCts.Token)
+                        .WaitAsync(connectTimeout, _stopCts.Token).GetAwaiter().GetResult();
+                    ipAddress = addresses[0];
                 }
 
                 IPEndPoint remoteEP = new IPEndPoint(ipAddress, port);
+                Socket socket;
+                lock (_lock)
+                {
+                    _stopCts.Token.ThrowIfCancellationRequested();
+                    socket = new Socket(ipAddress.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
+                    _socket = socket;
+                }
 
-                _logger.LogDebug(
-                    "[TVHclient] HTSConnectionAsync.Open: IPEndPoint = '{IP}'; AddressFamily = '{AF}'",
-                    remoteEP.ToString(),
-                    ipAddress.AddressFamily);
-
-                // Create a TCP/IP socket.
-                _socket = new Socket(ipAddress.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
-
-                // Detect a silently dead peer (e.g. remote server or VPN link
-                // gone away without RST/FIN) within ~90s instead of blocking
-                // in Receive() forever. Not every platform supports the tuning
-                // options, and a missing keepalive must not prevent connecting.
                 try
                 {
-                    _socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
-                    _socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveTime, 60);
-                    _socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveInterval, 10);
-                    _socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveRetryCount, 3);
+                    socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
+                    socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveTime, 60);
+                    socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveInterval, 10);
+                    socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveRetryCount, 3);
                 }
                 catch (SocketException ex)
                 {
-                    _logger.LogWarning(ex, "[TVHclient] HTSConnectionAsync.Open: TCP keepalive not available, a silently dead peer will not be detected");
+                    _logger.LogWarning(ex, "[TVHclient] HTSConnectionAsync.Open: TCP keepalive not available");
                 }
 
-                // Connect to the server, but never wait longer than connectTimeout:
-                // when the host is unreachable a plain Connect() blocks for the
-                // full kernel TCP timeout (about 2 minutes on Linux).
-                IAsyncResult connectResult = _socket.BeginConnect(remoteEP, null, null);
-                if (!connectResult.AsyncWaitHandle.WaitOne(connectTimeout, true))
+                IAsyncResult connectResult = socket.BeginConnect(remoteEP, null, null);
+                using (WaitHandle connectWait = connectResult.AsyncWaitHandle)
                 {
-                    _socket.Close();
-                    throw new TimeoutException("No response from '" + remoteEP + "' within " + connectTimeout.TotalSeconds + "s");
+                    while (!connectWait.WaitOne(TimeSpan.FromMilliseconds(100)))
+                    {
+                        _stopCts.Token.ThrowIfCancellationRequested();
+                        if (Stopwatch.GetElapsedTime(started) >= connectTimeout)
+                        {
+                            throw new TimeoutException("No response from '" + remoteEP + "' within " + connectTimeout.TotalSeconds + "s");
+                        }
+                    }
                 }
 
-                _socket.EndConnect(connectResult);
-
-                _connected = true;
-                _logger.LogDebug("[TVHclient] HTSConnectionAsync.Open: socket connected");
-
-                _receiveHandlerThread = StartBackgroundThread(ReceiveHandler);
-                _messageBuilderThread = StartBackgroundThread(MessageBuilder);
-                _sendingHandlerThread = StartBackgroundThread(SendingHandler);
-                _messageDistributorThread = StartBackgroundThread(MessageDistributor);
+                socket.EndConnect(connectResult);
+                lock (_lock)
+                {
+                    _stopCts.Token.ThrowIfCancellationRequested();
+                    _connected = true;
+                    _receiveHandlerThread = StartBackgroundThread(ReceiveHandler);
+                    _messageBuilderThread = StartBackgroundThread(MessageBuilder);
+                    _sendingHandlerThread = StartBackgroundThread(SendingHandler);
+                    _messageDistributorThread = StartBackgroundThread(MessageDistributor);
+                }
+            }
+            finally
+            {
+                lock (_lock)
+                {
+                    _opening = false;
+                    Monitor.PulseAll(_lock);
+                }
             }
         }
 
@@ -338,212 +377,177 @@ namespace TVHeadEnd.HTSP
 
         public void SendMessage(HTSMessage message, IHTSResponseHandler? responseHandler)
         {
-            // loop the sequence number
-            if (_seq == int.MaxValue)
+            lock (_lock)
             {
-                _seq = int.MinValue;
-            }
-            else
-            {
-                _seq++;
-            }
+                ObjectDisposedException.ThrowIf(_disposed, this);
+                if (!_connected || _needsRestart)
+                {
+                    throw new IOException("The HTSP connection is not available");
+                }
 
-            // housekeeping very old response handlers
-            _responseHandlers.Remove(_seq);
+                int sequence;
+                do
+                {
+                    _seq = _seq == int.MaxValue ? int.MinValue : _seq + 1;
+                    sequence = _seq;
+                }
+                while (_responseHandlers.ContainsKey(sequence));
 
-            message.PutField("seq", _seq);
-            _messagesForSendQueue.Enqueue(message);
-            _responseHandlers.Add(_seq, responseHandler);
+                message.PutField("seq", sequence);
+                _responseHandlers.Add(sequence, responseHandler);
+                _responseStarted.Add(sequence, Stopwatch.GetTimestamp());
+                // Registration precedes publication to the sending thread.
+                _messagesForSendQueue.Enqueue(message);
+            }
         }
 
         private void SendingHandler()
         {
-            bool threadOk = true;
-            while (_connected && threadOk)
+            try
             {
-                if (_sendingHandlerThreadTokenSource.IsCancellationRequested)
-                {
-                    return;
-                }
-
-                try
+                while (_connected)
                 {
                     HTSMessage message = _messagesForSendQueue.Dequeue();
-                    byte[] data2send = message.BuildBytes();
-                    int bytesSent = _socket!.Send(data2send);
-                    if (bytesSent != data2send.Length)
+                    byte[] data = message.BuildBytes();
+                    int offset = 0;
+                    while (offset < data.Length && _connected)
                     {
-                        _logger.LogError(
-                            "[TVHclient] HTSConnectionAsync.SendingHandler: sending data not completed\nBytes sent: {Txbytes}\nMessage bytes: " +
-                            "{Msgbytes}\nMessage: {Msg}",
-                            bytesSent,
-                            data2send.Length,
-                            message.ToString());
-                    }
-                }
-                catch (Exception ex)
-                {
-                    threadOk = false;
-                    if (_sendingHandlerThreadTokenSource.IsCancellationRequested || !_connected)
-                    {
-                        // Stop() closed the socket on purpose; not an error to report.
-                        return;
-                    }
+                        int sent = _socket!.Send(data, offset, data.Length - offset, SocketFlags.None);
+                        if (sent == 0)
+                        {
+                            throw new IOException("The HTSP socket stopped accepting data");
+                        }
 
-                    _logger.LogError(ex, "[TVHclient] HTSConnectionAsync.SendingHandler: exception caught");
-                    if (_listener != null)
-                    {
-                        _listener.OnError(this, ex);
-                    }
-                    else
-                    {
-                        _logger.LogError(ex, "[TVHclient] HTSConnectionAsync.SendingHandler: exception caught, but no error listener is configured");
+                        offset += sent;
                     }
                 }
+            }
+            catch (Exception ex)
+            {
+                ReportError(ex);
             }
         }
 
         private void ReceiveHandler()
         {
-            bool threadOk = true;
-            byte[] readBuffer = new byte[1024];
-            while (_connected && threadOk)
+            try
             {
-                if (_receiveHandlerThreadTokenSource.IsCancellationRequested)
-                {
-                    return;
-                }
-
-                try
+                byte[] readBuffer = new byte[1024];
+                while (_connected)
                 {
                     int bytesReceived = _socket!.Receive(readBuffer);
                     if (bytesReceived == 0)
                     {
-                        Stop();
-                        return;
+                        throw new IOException("The HTSP peer closed the connection");
                     }
 
                     _buffer.AppendCount(readBuffer, bytesReceived);
                 }
-                catch (Exception ex)
-                {
-                    threadOk = false;
-                    if (_receiveHandlerThreadTokenSource.IsCancellationRequested || !_connected)
-                    {
-                        // Stop() closed the socket on purpose; not an error to report.
-                        return;
-                    }
-
-                    if (_listener != null)
-                    {
-                        Task.Run(() => _listener.OnError(this, ex));
-                    }
-                    else
-                    {
-                        _logger.LogError(ex, "[TVHclient] HTSConnectionAsync.ReceiveHandler: exception caught, but no error listener is configured");
-                    }
-                }
+            }
+            catch (Exception ex)
+            {
+                ReportError(ex);
             }
         }
 
         private void MessageBuilder()
         {
-            bool threadOk = true;
-            while (_connected && threadOk)
+            try
             {
-                if (_messageBuilderThreadTokenSource.IsCancellationRequested)
-                {
-                    return;
-                }
-
-                try
+                while (_connected)
                 {
                     byte[] lengthInformation = _buffer.GetFromStart(4);
                     long messageDataLength = HTSMessage.UIntToLong(lengthInformation[0], lengthInformation[1], lengthInformation[2], lengthInformation[3]);
-                    byte[] messageData = _buffer.ExtractFromStart((int)messageDataLength + 4); // should be long !!!
+                    byte[] messageData = _buffer.ExtractFromStart(checked((int)messageDataLength + 4));
                     HTSMessage? response = HTSMessage.Parse(messageData, _loggerFactory.CreateLogger<HTSMessage>());
                     if (response != null)
                     {
                         _receivedMessagesQueue.Enqueue(response);
                     }
                 }
-                catch (Exception ex)
-                {
-                    threadOk = false;
-                    if (_listener != null)
-                    {
-                        _listener.OnError(this, ex);
-                    }
-                    else
-                    {
-                        _logger.LogError(ex, "[TVHclient] HTSConnectionAsync.MessageBuilder: exception caught, but no error listener is configured");
-                    }
-                }
+            }
+            catch (Exception ex)
+            {
+                ReportError(ex);
             }
         }
 
         private void MessageDistributor()
         {
-            bool threadOk = true;
-            while (_connected && threadOk)
+            try
             {
-                if (_messageDistributorThreadTokenSource.IsCancellationRequested)
-                {
-                    return;
-                }
-
-                try
+                while (_connected)
                 {
                     HTSMessage response = _receivedMessagesQueue.Dequeue();
                     if (response.ContainsField("seq"))
                     {
-                        int seqNo = response.GetInt("seq");
-                        if (_responseHandlers.TryGetValue(seqNo, out var currHTSResponseHandler))
+                        int sequence = response.GetInt("seq");
+                        IHTSResponseHandler? handler;
+                        lock (_lock)
                         {
-                            if (currHTSResponseHandler != null)
+                            if (!_connected || !_responseHandlers.TryGetValue(sequence, out handler))
                             {
-                                _responseHandlers.Remove(seqNo);
-                                currHTSResponseHandler.HandleResponse(response);
+                                continue;
                             }
+
+                            _responseStarted.Remove(sequence);
                         }
-                        else
+
+                        // Keep the handler registered until processing finishes so Stop
+                        // can fail even an in-flight response. Callbacks run without _lock.
+                        handler?.HandleResponse(response);
+                        lock (_lock)
                         {
-                            _logger.LogCritical("[TVHclient] HTSConnectionAsync.MessageDistributor: HTSResponseHandler for seq = '{Seq}' not found", seqNo);
+                            _responseHandlers.Remove(sequence);
                         }
                     }
                     else
                     {
-                        // auto update messages
-                        if (_listener != null)
-                        {
-                            _listener.OnMessage(response);
-                        }
+                        _listener.OnMessage(this, response);
                     }
                 }
-                catch (Exception ex)
-                {
-                    threadOk = false;
-                    if (_listener != null)
-                    {
-                        _listener.OnError(this, ex);
-                    }
-                    else
-                    {
-                        _logger.LogError(ex, "[TVHclient] HTSConnectionAsync.MessageBuilder: exception caught, but no error listener is configured");
-                    }
-                }
+            }
+            catch (Exception ex)
+            {
+                ReportError(ex);
             }
         }
 
         public void Dispose()
         {
-            Stop();
+            lock (_lock)
+            {
+                if (_disposed)
+                {
+                    return;
+                }
 
-            _receiveHandlerThreadTokenSource.Dispose();
-            _messageBuilderThreadTokenSource.Dispose();
-            _sendingHandlerThreadTokenSource.Dispose();
-            _messageDistributorThreadTokenSource.Dispose();
+                _disposed = true;
+            }
+
+            Stop();
+            lock (_lock)
+            {
+                while (_opening)
+                {
+                    Monitor.Wait(_lock);
+                }
+            }
+
+            JoinWorker(_receiveHandlerThread);
+            JoinWorker(_messageBuilderThread);
+            JoinWorker(_sendingHandlerThread);
+            JoinWorker(_messageDistributorThread);
             _socket?.Dispose();
+            _stopCts.Dispose();
+        }
+
+        private static void JoinWorker(Thread? worker)
+        {
+            if (worker != null && worker != Thread.CurrentThread)
+            {
+                worker.Join();
+            }
         }
     }
 }
