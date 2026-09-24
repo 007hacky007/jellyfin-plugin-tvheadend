@@ -61,12 +61,23 @@ namespace TVHeadEnd
         private bool _initialLoadFinished;
         private bool _connected;
         private bool _configured;
+        // True while there is no connection attempt callers should wait for: only the
+        // first attempt after startup and the first one after a working session dropped
+        // are awaited, retries of a failed attempt fail fast.
         private bool _firstConnectAttemptCompleted;
+
+        // Set when TVHeadend rejected the credentials; cleared once the connection
+        // settings that were rejected have been changed in the configuration.
         private bool _authenticationFailed;
+        private string? _rejectedConfiguration;
 
         private Task? _connectionTask;
         private bool _disposed;
         private bool _initialSyncReceived;
+
+        // The current session completed the initial sync at some point; decides whether a
+        // drop is followed by an immediate, awaited reconnect or by the backoff.
+        private bool _sessionSynced;
         private long _lastSyncProgress;
 
         [SuppressMessage("Usage", "CA2213:Disposable fields should be disposed", Justification = "ConnectionLoop owns and disposes each attempt in its finally block; Dispose stops and joins that loop.")]
@@ -125,17 +136,13 @@ namespace TVHeadEnd
                         return -1;
                     }
 
-                    if (_htsConnection?.NeedsRestart() == true)
-                    {
-                        return -1;
-                    }
-
-                    if (_connected && _htsConnection != null && _initialLoadFinished)
+                    bool connected = _connected && _htsConnection != null && !_htsConnection.NeedsRestart();
+                    if (connected && _initialLoadFinished)
                     {
                         return 0;
                     }
 
-                    if ((_firstConnectAttemptCompleted && !_connected)
+                    if ((_firstConnectAttemptCompleted && !connected)
                         || Stopwatch.GetElapsedTime(started) >= _initialLoadTimeout)
                     {
                         return -1;
@@ -375,7 +382,7 @@ namespace TVHeadEnd
                 if (_authenticationFailed)
                 {
                     return "authentication with TVHeadend server '" + _tvhServerName + ":" + _htspPort
-                        + "' failed; the plugin will not reconnect until Jellyfin is restarted";
+                        + "' failed; the plugin retries once the connection settings in the plugin configuration are changed";
                 }
 
                 return "TVHeadend server '" + _tvhServerName + ":" + _htspPort + "' is unreachable or has not finished the initial sync";
@@ -386,9 +393,25 @@ namespace TVHeadEnd
         {
             lock (_lock)
             {
-                if (_disposed || _authenticationFailed)
+                if (_disposed)
                 {
                     return;
+                }
+
+                if (_authenticationFailed)
+                {
+                    // Rejected credentials do not fix themselves: retry only once the
+                    // connection settings differ from the ones the server rejected.
+                    _configured = false;
+                    InitConfiguration();
+                    if (string.Equals(ConfigurationKey(_tvhServerName, _htspPort, _userName, _password), _rejectedConfiguration, StringComparison.Ordinal))
+                    {
+                        return;
+                    }
+
+                    _authenticationFailed = false;
+                    _rejectedConfiguration = null;
+                    _logger.LogInformation("[TVHclient] HTSConnectionHandler: connection settings changed, retrying authentication with TVHeadend");
                 }
 
                 InitConfiguration();
@@ -398,18 +421,27 @@ namespace TVHeadEnd
                     // A disconnect cannot race a successful task's completion anymore. The
                     // loop only ends on shutdown or rejected credentials, both gated above,
                     // so a completed task here is unexpected and simply gets replaced.
+                    _firstConnectAttemptCompleted = false;
                     CancellationToken token = _connectionLoopCts.Token;
                     _connectionTask = Task.Run(() => ConnectionLoop(token), CancellationToken.None);
                 }
             }
         }
 
+        private static string ConfigurationKey(string hostname, int port, string username, string password)
+        {
+            return string.Join('\n', hostname, port, username, password);
+        }
+
         private async Task ConnectionLoop(CancellationToken cancellationToken)
         {
+            // Consecutive failed attempts since startup or since the last session that
+            // completed the initial sync; drives the backoff and decides who waits.
             int attempt = 0;
             while (!cancellationToken.IsCancellationRequested)
             {
                 HTSConnectionAsync? connection = null;
+                bool synced = false;
                 string hostname = _tvhServerName;
                 int port = _htspPort;
                 try
@@ -437,7 +469,16 @@ namespace TVHeadEnd
                         _connected = false;
                         _initialLoadFinished = false;
                         _initialSyncReceived = false;
-                        _firstConnectAttemptCompleted = false;
+                        _sessionSynced = false;
+                        if (attempt == 0)
+                        {
+                            // Callers wait for this attempt: it is the first one after startup
+                            // or the reconnect right after a working session dropped. Retries
+                            // of a failed attempt are not awaited, so a dead server never
+                            // blocks the UI beyond the first attempt.
+                            _firstConnectAttemptCompleted = false;
+                        }
+
                         _lastSyncProgress = Stopwatch.GetTimestamp();
                         Monitor.PulseAll(_lock);
                     }
@@ -449,19 +490,19 @@ namespace TVHeadEnd
                         lock (_lock)
                         {
                             _authenticationFailed = true;
+                            _rejectedConfiguration = ConfigurationKey(hostname, port, username, password);
                             Monitor.PulseAll(_lock);
                         }
 
                         _logger.LogError(
                             "[TVHclient] HTSConnectionHandler.ConnectionLoop: TVHeadend server {ServerAddress}:{Htspport} rejected the credentials of user '{User}'. "
-                            + "Giving up: Live TV stays unavailable until the username and password in the plugin configuration are corrected and Jellyfin is restarted",
+                            + "Giving up: Live TV stays unavailable until the server, username or password in the plugin configuration are changed",
                             hostname,
                             port,
                             username);
                         return;
                     }
 
-                    long syncStarted = Stopwatch.GetTimestamp();
                     lock (_lock)
                     {
                         cancellationToken.ThrowIfCancellationRequested();
@@ -473,7 +514,8 @@ namespace TVHeadEnd
                         ApplyServerWebRoot(connection.GetWebRoot());
                         _connected = true;
                         _initialLoadFinished = _initialSyncReceived;
-                        _lastSyncProgress = syncStarted;
+                        _sessionSynced = _initialSyncReceived;
+                        _lastSyncProgress = Stopwatch.GetTimestamp();
                         Monitor.PulseAll(_lock);
                     }
 
@@ -493,13 +535,10 @@ namespace TVHeadEnd
                     {
                         lock (_lock)
                         {
-                            if (_initialLoadFinished)
+                            if (!_initialLoadFinished && Stopwatch.GetElapsedTime(_lastSyncProgress) >= _syncProgressTimeout)
                             {
-                                attempt = 0;
-                            }
-                            else if (Stopwatch.GetElapsedTime(_lastSyncProgress) >= _syncProgressTimeout
-                                || Stopwatch.GetElapsedTime(syncStarted) >= _initialLoadTimeout)
-                            {
+                                // Stalled, as opposed to merely large: a big dump keeps
+                                // arriving and refreshes the progress timestamp.
                                 throw new TimeoutException("TVHeadend did not complete initial metadata sync");
                             }
                         }
@@ -546,13 +585,24 @@ namespace TVHeadEnd
                             _initialSyncReceived = false;
                         }
 
-                        _firstConnectAttemptCompleted = true;
+                        // After a working session the reconnect is immediate and awaited, so
+                        // callers keep waiting; after a failed attempt they fail fast.
+                        synced = _sessionSynced;
+                        _firstConnectAttemptCompleted = !synced;
                         Monitor.PulseAll(_lock);
                     }
 
                     // Only the loop disposes its attempts, including rejected credentials
                     // and shutdown. Never join workers while holding the handler lock.
                     connection?.Dispose();
+                }
+
+                if (synced)
+                {
+                    // A working session dropped: reconnect right away, and awaited, so a
+                    // brief server restart stays invisible to callers.
+                    attempt = 0;
+                    continue;
                 }
 
                 attempt++;
@@ -663,10 +713,13 @@ namespace TVHeadEnd
                 }
 
                 wasConnected = _connected;
+
+                // A synced session that dies is reconnected immediately and callers wait for
+                // that attempt; a failure before the sync completed fails fast instead.
+                _firstConnectAttemptCompleted = !_sessionSynced;
                 _connected = false;
                 _initialLoadFinished = false;
                 _initialSyncReceived = false;
-                _firstConnectAttemptCompleted = true;
                 Monitor.PulseAll(_lock);
             }
 
@@ -754,6 +807,7 @@ namespace TVHeadEnd
                     case "initialSyncCompleted":
                         _initialSyncReceived = true;
                         _initialLoadFinished = _connected;
+                        _sessionSynced |= _connected;
                         Monitor.PulseAll(_lock);
                         break;
 

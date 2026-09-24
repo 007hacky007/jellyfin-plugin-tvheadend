@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -141,19 +142,36 @@ public class AccessTicketHandler
              attempt <= lastAttempt && !cancellation.IsCancellationRequested;
              attempt++)
         {
-            var runner = new TaskWithTimeoutRunner<HTSMessage>(_requestTimeout * attempt);
-            var result = await runner.RunWithTimeout(Task.Run(
-                () =>
-                {
-                    var response = new LoopBackResponseHandler();
-                    _htsConnectionHandler.SendMessage(request, response);
-                    return response.GetResponse();
-                },
-                cancellation)).ConfigureAwait(false);
-
-            if (!result.HasTimeout)
+            // Wait for a reconnect that is in flight (a server restart right before
+            // playback) instead of failing on the first attempt; a server known to be
+            // down fails fast with the reason.
+            if (await Task.Run(() => _htsConnectionHandler.WaitForInitialLoad(cancellation), cancellation).ConfigureAwait(false) == -1)
             {
-                return result.Result;
+                throw new IOException("Can't obtain playback authentication ticket: " + _htsConnectionHandler.GetUnavailableReason());
+            }
+
+            var runner = new TaskWithTimeoutRunner<HTSMessage>(_requestTimeout * attempt);
+            try
+            {
+                var result = await runner.RunWithTimeout(Task.Run(
+                    () =>
+                    {
+                        var response = new LoopBackResponseHandler();
+                        _htsConnectionHandler.SendMessage(request, response);
+                        return response.GetResponse();
+                    },
+                    cancellation)).ConfigureAwait(false);
+
+                if (!result.HasTimeout)
+                {
+                    return result.Result;
+                }
+            }
+            catch (Exception ex) when (ex is IOException or InvalidOperationException && attempt < lastAttempt && !cancellation.IsCancellationRequested)
+            {
+                // The connection dropped underneath the request; the next attempt waits
+                // for the reconnect.
+                _logger.LogWarning("[TVHclient] AccessTicketHandler.GetAccessTicket: ticket request attempt {Attempt} failed - {Message}", attempt, ex.Message);
             }
         }
 

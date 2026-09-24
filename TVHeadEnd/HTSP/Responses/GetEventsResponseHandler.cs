@@ -812,7 +812,10 @@ namespace TVHeadEnd.HTSP.Responses
                         }
 
                         cancellationToken.ThrowIfCancellationRequested();
-                        if (_error != null)
+
+                        // A reply that arrived completely is good data even if the connection
+                        // died right afterwards; only fail when there is none.
+                        if (!_dataReady)
                         {
                             throw new IOException("Could not retrieve channel events", _error);
                         }

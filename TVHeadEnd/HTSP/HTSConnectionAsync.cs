@@ -18,6 +18,12 @@ namespace TVHeadEnd.HTSP
         // during the handshake can't block the caller forever.
         private static readonly TimeSpan ResponseTimeout = TimeSpan.FromSeconds(20);
 
+        // A server that stopped answering altogether is detected through the age of its
+        // oldest unanswered request. Requests after the handshake can legitimately take far
+        // longer than the handshake itself (a week of EPG for one channel over a slow link),
+        // so this is deliberately generous; the service layer bounds individual calls.
+        private static readonly TimeSpan RequestTimeout = TimeSpan.FromMinutes(2);
+
         private readonly object _lock;
         private readonly IHTSConnectionListener _listener;
         private readonly string _clientName;
@@ -134,7 +140,7 @@ namespace TVHeadEnd.HTSP
             {
                 foreach (long started in _responseStarted.Values)
                 {
-                    if (Stopwatch.GetElapsedTime(started) >= ResponseTimeout)
+                    if (Stopwatch.GetElapsedTime(started) >= RequestTimeout)
                     {
                         return true;
                     }
