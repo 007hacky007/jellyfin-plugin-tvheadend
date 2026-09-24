@@ -425,8 +425,30 @@ namespace TVHeadEnd
 
                     if (connection.Authenticate(_userName, _password))
                     {
+                        // The handshake sent enableAsyncMetadata, so the connection can
+                        // already die and be torn down by OnError while this code runs.
+                        // _connected may only be set for the connection _htsConnection
+                        // still refers to: OnError's StartConnectionLoop call is a no-op
+                        // while this loop is running, so ending the iteration with
+                        // _connected true and no connection would block reconnecting
+                        // (and leave WaitForInitialLoad blocking) forever.
+                        bool current;
+                        lock (_lock)
+                        {
+                            current = ReferenceEquals(connection, _htsConnection);
+                            if (current)
+                            {
+                                _connected = true;
+                            }
+                        }
+
+                        if (!current)
+                        {
+                            _logger.LogWarning("[TVHclient] HTSConnectionHandler.ConnectionLoop: connection lost while completing the handshake, retrying");
+                            continue;
+                        }
+
                         ApplyServerWebRoot(connection.GetWebRoot());
-                        _connected = true;
 
                         _logger.LogInformation(
                             "[TVHclient] HTSConnectionHandler.ConnectionLoop: connection to {ServerAddress}:{Htspport} established; "
@@ -567,14 +589,15 @@ namespace TVHeadEnd
             return _dvrDataHelper.BuildPendingTimersInfos(cancellationToken);
         }
 
-        public void OnError(Exception ex)
+        public void OnError(HTSConnectionAsync connection, Exception ex)
         {
             _logger.LogError(ex, "[TVHclient] HTSConnectionHandler: HTSP error");
             lock (_lock)
             {
-                if (_htsConnection == null)
+                if (!ReferenceEquals(connection, _htsConnection))
                 {
-                    // Error of a connection that has already been torn down.
+                    // Error of a connection that has already been torn down or replaced;
+                    // it must not take down its replacement.
                     return;
                 }
 
