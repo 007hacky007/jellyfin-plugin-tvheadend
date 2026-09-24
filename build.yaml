@@ -1,7 +1,7 @@
 name: "TVHeadend Fail-Fast"
 guid: "980dc09b-7127-4a6e-b101-b6ae374ea0cc"
 imageUrl: "https://repo.jellyfin.org/releases/plugin/images/jellyfin-plugin-tvheadend.png"
-version: 15.1.1
+version: 15.1.2
 targetAbi: "12.0.0.0"
 framework: "net10.0"
 owner: "007hacky007"
@@ -11,6 +11,10 @@ category: "LiveTV"
 artifacts:
   - "TVHeadEnd.dll"
 changelog: |-
+  - Rework the connection lifecycle after upstream review: one background loop owns each connection, stale callbacks cannot affect a replacement connection, and shutdown or connection loss wakes every pending request
+  - A brief TVHeadend restart is now invisible: the reconnect is immediate and callers wait for it; retries against a server that is really down never block the UI
+  - Rejected credentials are retried once the server, username or password in the configuration change (no restart needed); a stalled initial sync or a server that stopped answering triggers a reconnect
+  - Playback right after a TVHeadend restart waits for the reconnect instead of failing; the configuration is re-read on every reconnect attempt
   - Fix a guide refresh while TVHeadend is unreachable deleting all channels and EPG data from Jellyfin: the plugin now reports an error instead of an empty channel list, so existing data is kept
   - Rejected credentials stop the reconnect loop for good, with a clear error in the log (unreachable servers keep being retried with backoff)
   - A connection closed by the server is rebuilt on the next call; keepalive tuning failures no longer prevent connecting; the reconnect loop stops when the plugin is unloaded
