@@ -9,6 +9,14 @@
     "imageUrl": "https://repo.jellyfin.org/releases/plugin/images/jellyfin-plugin-tvheadend.png",
     "versions": [
       {
+        "version": "15.1.2.0",
+        "changelog": "- Connection lifecycle reworked after upstream review: one background loop owns each connection, stale callbacks cannot affect a replacement connection, shutdown or connection loss wakes every pending request\n- A brief TVHeadend restart is now invisible: the reconnect is immediate and callers wait for it; retries against a server that is really down never block the UI\n- Rejected credentials are retried once the server, username or password in the configuration change (no restart needed); a stalled initial sync or a server that stopped answering triggers a reconnect\n- Playback right after a TVHeadend restart waits for the reconnect instead of failing; the configuration is re-read on every reconnect attempt",
+        "targetAbi": "12.0.0.0",
+        "sourceUrl": "https://github.com/007hacky007/jellyfin-plugin-tvheadend/releases/download/v15.1.2.0/tvheadend-failfast_15.1.2.0.zip",
+        "checksum": "b6a4d0c0ca01f09cd7bb528d43df7a16",
+        "timestamp": "2026-09-24T18:10:00Z"
+      },
+      {
         "version": "15.1.1.0",
         "changelog": "- Fix a guide refresh while TVHeadend is unreachable deleting all channels and EPG data from Jellyfin: the plugin now reports an error instead of an empty channel list, so existing data is kept\n- Rejected credentials stop the reconnect loop for good, with a clear error in the log (unreachable servers keep being retried with backoff)\n- A connection closed by the server is rebuilt on the next call; keepalive tuning failures no longer prevent connecting; the reconnect loop stops when the plugin is unloaded",
         "targetAbi": "12.0.0.0",
