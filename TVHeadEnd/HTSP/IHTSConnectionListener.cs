@@ -4,7 +4,7 @@ namespace TVHeadEnd.HTSP
 {
     public interface IHTSConnectionListener
     {
-        void OnMessage(HTSMessage response);
+        void OnMessage(HTSConnectionAsync connection, HTSMessage response);
 
         /// <summary>
         /// Reports a fatal error of one connection.

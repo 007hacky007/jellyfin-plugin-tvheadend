@@ -17,6 +17,11 @@ namespace TVHeadEnd.HTSP.Responses
             _responseDataQueue.Enqueue(response);
         }
 
+        public void HandleError(Exception error)
+        {
+            _responseDataQueue.Close(error);
+        }
+
         public HTSMessage GetResponse()
         {
             return _responseDataQueue.Dequeue();

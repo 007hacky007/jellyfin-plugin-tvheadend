@@ -1,15 +1,17 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
+using System.IO;
 using System.Threading;
 
 namespace TVHeadEnd.Helper
 {
     public class BlockingBuffer<T>
     {
-        private readonly TimeSpan _timeOut = new TimeSpan(0, 0, 30);
         private readonly Queue<T> _queue = new Queue<T>();
         private readonly int _maxSize;
+        private Exception? _error;
 
         public BlockingBuffer(int maxSize)
         {
@@ -20,11 +22,12 @@ namespace TVHeadEnd.Helper
         {
             lock (_queue)
             {
-                while (_queue.Count >= _maxSize)
+                while (_queue.Count >= _maxSize && _error == null)
                 {
-                    Monitor.Wait(_queue, _timeOut);
+                    Monitor.Wait(_queue);
                 }
 
+                ThrowIfClosed();
                 _queue.Enqueue(item);
                 if (_queue.Count == 1)
                 {
@@ -40,7 +43,8 @@ namespace TVHeadEnd.Helper
             {
                 while (_queue.Count == 0)
                 {
-                    Monitor.Wait(_queue, _timeOut);
+                    ThrowIfClosed();
+                    Monitor.Wait(_queue);
                 }
 
                 T item = _queue.Dequeue();
@@ -56,12 +60,13 @@ namespace TVHeadEnd.Helper
 
         public bool TryDequeue([MaybeNullWhen(false)] out T item, TimeSpan timeout)
         {
-            DateTime deadline = DateTime.UtcNow + timeout;
+            long started = Stopwatch.GetTimestamp();
             lock (_queue)
             {
                 while (_queue.Count == 0)
                 {
-                    TimeSpan remaining = deadline - DateTime.UtcNow;
+                    ThrowIfClosed();
+                    TimeSpan remaining = timeout - Stopwatch.GetElapsedTime(started);
                     if (remaining <= TimeSpan.Zero)
                     {
                         item = default;
@@ -79,6 +84,23 @@ namespace TVHeadEnd.Helper
                 }
 
                 return true;
+            }
+        }
+
+        public void Close(Exception error)
+        {
+            lock (_queue)
+            {
+                _error ??= error;
+                Monitor.PulseAll(_queue);
+            }
+        }
+
+        private void ThrowIfClosed()
+        {
+            if (_error != null)
+            {
+                throw new IOException("The connection buffer is closed", _error);
             }
         }
     }

@@ -95,16 +95,13 @@ namespace TVHeadEnd.DataHelper
         {
             return Task.Run<IEnumerable<ChannelInfo>>(() =>
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 lock (_data)
                 {
                     List<ChannelInfo> result = new List<ChannelInfo>();
                     foreach (KeyValuePair<int, HTSMessage> entry in _data)
                     {
-                        if (cancellationToken.IsCancellationRequested)
-                        {
-                            _logger.LogDebug("[TVHclient] ChannelDataHelper.buildChannelInfos: call cancelled - returning partial list");
-                            return result;
-                        }
+                        cancellationToken.ThrowIfCancellationRequested();
 
                         HTSMessage m = entry.Value;
 
