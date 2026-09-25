@@ -285,6 +285,24 @@ public class ConnectionTests
     }
 
     [Fact]
+    public async Task OutageThrowsForRecordingsAndTimersInsteadOfReturningEmpty()
+    {
+        await using var server = new Peer { Reject = true };
+        Configure(server.Port);
+        using var handler = new HTSConnectionHandler(NullLoggerFactory.Instance);
+        var service = new LiveTvService(NullLoggerFactory.Instance, null!, handler);
+        handler.SetLiveTvService(service);
+        var recordings = new RecordingsChannel(NullLoggerFactory.Instance, handler);
+
+        // Jellyfin deletes recording items missing from a channel refresh, so an empty
+        // list during an outage is data loss; timers must fail the same way for consistency.
+        await Assert.ThrowsAsync<InvalidOperationException>(() => recordings.GetChannelItems(new MediaBrowser.Controller.Channels.InternalChannelItemQuery(), CancellationToken.None).WaitAsync(Deadline));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.GetTimersAsync(CancellationToken.None).WaitAsync(Deadline));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.GetSeriesTimersAsync(CancellationToken.None).WaitAsync(Deadline));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.CancelTimerAsync("1", CancellationToken.None).WaitAsync(Deadline));
+    }
+
+    [Fact]
     public async Task ProgramRequestThrowsOnDisconnectInsteadOfReturningEmpty()
     {
         await using var server = new Peer { CloseOnEvents = true };

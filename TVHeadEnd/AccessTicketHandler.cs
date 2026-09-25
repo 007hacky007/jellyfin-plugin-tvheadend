@@ -145,10 +145,7 @@ public class AccessTicketHandler
             // Wait for a reconnect that is in flight (a server restart right before
             // playback) instead of failing on the first attempt; a server known to be
             // down fails fast with the reason.
-            if (await Task.Run(() => _htsConnectionHandler.WaitForInitialLoad(cancellation), cancellation).ConfigureAwait(false) == -1)
-            {
-                throw new IOException("Can't obtain playback authentication ticket: " + _htsConnectionHandler.GetUnavailableReason());
-            }
+            await _htsConnectionHandler.EnsureAvailableAsync("Obtaining a playback ticket", cancellation).ConfigureAwait(false);
 
             var runner = new TaskWithTimeoutRunner<HTSMessage>(_requestTimeout * attempt);
             try

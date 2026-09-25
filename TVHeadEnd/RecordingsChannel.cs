@@ -146,22 +146,14 @@ namespace TVHeadEnd
                 ?? throw new InvalidOperationException("The TVHeadend LiveTvService has not been registered yet");
         }
 
-        private Task<int> WaitForInitialLoadTask(CancellationToken cancellationToken)
-        {
-            return Task.Run(() => _htsConnectionHandler.WaitForInitialLoad(cancellationToken), cancellationToken);
-        }
-
         public async Task<IEnumerable<MyRecordingInfo>> GetAllRecordingsAsync(CancellationToken cancellationToken)
         {
             // retrieve all 'Pending', 'Inprogress' and 'Completed' recordings
             // we don't deliver the 'Pending' recordings
 
-            int timeOut = await WaitForInitialLoadTask(cancellationToken).ConfigureAwait(false);
-            if (timeOut == -1 || cancellationToken.IsCancellationRequested)
-            {
-                _logger.LogDebug("[TVHclient] GetAllRecordingsAsync - Not initialized ");
-                return [];
-            }
+            // Jellyfin's channel refresh deletes every recording item missing from the result,
+            // so an outage has to surface as an error rather than as an empty list.
+            await _htsConnectionHandler.EnsureAvailableAsync(nameof(GetAllRecordingsAsync), cancellationToken).ConfigureAwait(false);
 
             TaskWithTimeoutRunner<IEnumerable<MyRecordingInfo>> twtr = new TaskWithTimeoutRunner<IEnumerable<MyRecordingInfo>>(_timeout);
             TaskWithTimeoutResult<IEnumerable<MyRecordingInfo>> twtRes = await
@@ -169,8 +161,7 @@ namespace TVHeadEnd
 
             if (twtRes.HasTimeout)
             {
-                _logger.LogDebug("[TVHclient] GetAllRecordingsAsync - Timeout");
-                return [];
+                throw new TimeoutException("[TVHclient] GetAllRecordingsAsync: recording list construction timed out");
             }
 
             return twtRes.Result;
