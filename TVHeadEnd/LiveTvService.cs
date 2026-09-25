@@ -553,7 +553,7 @@ namespace TVHeadEnd
 
         public async Task<IEnumerable<SeriesTimerInfo>> GetSeriesTimersAsync(CancellationToken cancellationToken)
         {
-            await _htsConnectionHandler.EnsureAvailableAsync(nameof(GetNewTimerDefaultsAsync), cancellationToken).ConfigureAwait(false);
+            await _htsConnectionHandler.EnsureAvailableAsync(nameof(GetSeriesTimersAsync), cancellationToken).ConfigureAwait(false);
 
             TaskWithTimeoutRunner<IEnumerable<SeriesTimerInfo>> twtr = new TaskWithTimeoutRunner<IEnumerable<SeriesTimerInfo>>(_timeout);
             TaskWithTimeoutResult<IEnumerable<SeriesTimerInfo>> twtRes = await
@@ -564,6 +564,7 @@ namespace TVHeadEnd
                 throw new TimeoutException("LiveTvService.GetSeriesTimersAsync: series timer list construction timed out");
             }
 
+            cancellationToken.ThrowIfCancellationRequested();
             return twtRes.Result;
         }
 
@@ -571,7 +572,7 @@ namespace TVHeadEnd
         {
             // Retrieve the 'Pending' recordings
 
-            await _htsConnectionHandler.EnsureAvailableAsync(nameof(GetNewTimerDefaultsAsync), cancellationToken).ConfigureAwait(false);
+            await _htsConnectionHandler.EnsureAvailableAsync(nameof(GetTimersAsync), cancellationToken).ConfigureAwait(false);
 
             TaskWithTimeoutRunner<IEnumerable<TimerInfo>> twtr = new TaskWithTimeoutRunner<IEnumerable<TimerInfo>>(_timeout);
             TaskWithTimeoutResult<IEnumerable<TimerInfo>> twtRes = await
@@ -582,6 +583,7 @@ namespace TVHeadEnd
                 throw new TimeoutException("LiveTvService.GetTimersAsync: timer list construction timed out");
             }
 
+            cancellationToken.ThrowIfCancellationRequested();
             return twtRes.Result;
         }
 

@@ -680,7 +680,39 @@ namespace TVHeadEnd
 
         public Task<IEnumerable<ChannelInfo>> BuildChannelInfos(CancellationToken cancellationToken)
         {
-            return _channelDataHelper.BuildChannelInfos(cancellationToken);
+            return BuildSnapshotAsync(_channelDataHelper.BuildChannelInfos, cancellationToken);
+        }
+
+        private async Task<IEnumerable<T>> BuildSnapshotAsync<T>(Func<CancellationToken, Task<IEnumerable<T>>> build, CancellationToken cancellationToken)
+        {
+            HTSConnectionAsync connection;
+            Task<IEnumerable<T>> building;
+            lock (_lock)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (_disposed || !_connected || !_initialLoadFinished || _htsConnection == null || _htsConnection.NeedsRestart())
+                {
+                    throw new InvalidOperationException("[TVHclient] Cannot build a metadata snapshot: " + GetUnavailableReason());
+                }
+
+                connection = _htsConnection;
+                building = build(cancellationToken);
+            }
+
+            // The reconnect loop clears the helpers before receiving the next dump. A call
+            // admitted by the availability gate must not publish that incomplete snapshot,
+            // even if the replacement has already finished syncing by the time we return.
+            var result = await building.ConfigureAwait(false);
+            lock (_lock)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (_disposed || !ReferenceEquals(connection, _htsConnection) || !_connected || !_initialLoadFinished || connection.NeedsRestart())
+                {
+                    throw new InvalidOperationException("[TVHclient] The TVHeadend connection changed while building a metadata snapshot");
+                }
+
+                return result;
+            }
         }
 
         public int GetPriority()
@@ -720,17 +752,17 @@ namespace TVHeadEnd
 
         public Task<IEnumerable<MyRecordingInfo>> BuildDvrInfos(CancellationToken cancellationToken)
         {
-            return _dvrDataHelper.BuildDvrInfos(cancellationToken);
+            return BuildSnapshotAsync(_dvrDataHelper.BuildDvrInfos, cancellationToken);
         }
 
         public Task<IEnumerable<SeriesTimerInfo>> BuildAutorecInfos(CancellationToken cancellationToken)
         {
-            return _autorecDataHelper.BuildAutorecInfos(cancellationToken);
+            return BuildSnapshotAsync(_autorecDataHelper.BuildAutorecInfos, cancellationToken);
         }
 
         public Task<IEnumerable<TimerInfo>> BuildPendingTimersInfos(CancellationToken cancellationToken)
         {
-            return _dvrDataHelper.BuildPendingTimersInfos(cancellationToken);
+            return BuildSnapshotAsync(_dvrDataHelper.BuildPendingTimersInfos, cancellationToken);
         }
 
         public void OnError(HTSConnectionAsync connection, Exception ex)

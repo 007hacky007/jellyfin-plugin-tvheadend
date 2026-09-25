@@ -102,6 +102,7 @@ namespace TVHeadEnd.DataHelper
         {
             return Task.Run<IEnumerable<MyRecordingInfo>>(() =>
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 lock (_data)
                 {
                     List<MyRecordingInfo> result = new List<MyRecordingInfo>();
@@ -321,6 +322,7 @@ namespace TVHeadEnd.DataHelper
                         result.Add(ri);
                     }
 
+                    cancellationToken.ThrowIfCancellationRequested();
                     return result;
                 }
             });
@@ -330,6 +332,7 @@ namespace TVHeadEnd.DataHelper
         {
             return Task.Run<IEnumerable<TimerInfo>>(() =>
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 lock (_data)
                 {
                     List<TimerInfo> result = new List<TimerInfo>();
@@ -487,6 +490,7 @@ namespace TVHeadEnd.DataHelper
                         result.Add(ti);
                     }
 
+                    cancellationToken.ThrowIfCancellationRequested();
                     return result;
                 }
             });

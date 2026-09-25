@@ -164,6 +164,7 @@ namespace TVHeadEnd
                 throw new TimeoutException("[TVHclient] GetAllRecordingsAsync: recording list construction timed out");
             }
 
+            cancellationToken.ThrowIfCancellationRequested();
             return twtRes.Result;
         }
 
