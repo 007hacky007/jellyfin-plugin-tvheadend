@@ -22,6 +22,17 @@ namespace TVHeadEnd.DataHelper
             _data = new Dictionary<string, HTSMessage>();
         }
 
+        /// <summary>
+        /// Forgets every entry so the next session's dump is not merged into stale state.
+        /// </summary>
+        public void Clear()
+        {
+            lock (_data)
+            {
+                _data.Clear();
+            }
+        }
+
         public void DvrEntryAdd(HTSMessage message)
         {
             string? id = message.GetString("id");
@@ -96,11 +107,7 @@ namespace TVHeadEnd.DataHelper
                     List<MyRecordingInfo> result = new List<MyRecordingInfo>();
                     foreach (KeyValuePair<string, HTSMessage> entry in _data)
                     {
-                        if (cancellationToken.IsCancellationRequested)
-                        {
-                            _logger.LogDebug("[TVHclient] DvrDataHelper.buildDvrInfos: call cancelled - returning partial list");
-                            return result;
-                        }
+                        cancellationToken.ThrowIfCancellationRequested();
 
                         HTSMessage m = entry.Value;
                         MyRecordingInfo ri = new MyRecordingInfo();
@@ -328,11 +335,7 @@ namespace TVHeadEnd.DataHelper
                     List<TimerInfo> result = new List<TimerInfo>();
                     foreach (KeyValuePair<string, HTSMessage> entry in _data)
                     {
-                        if (cancellationToken.IsCancellationRequested)
-                        {
-                            _logger.LogDebug("[TVHclient] DvrDataHelper.buildDvrInfos: call cancelled - returning partial list");
-                            return result;
-                        }
+                        cancellationToken.ThrowIfCancellationRequested();
 
                         HTSMessage m = entry.Value;
                         TimerInfo ti = new TimerInfo();

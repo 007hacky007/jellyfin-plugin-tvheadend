@@ -80,37 +80,7 @@ namespace TVHeadEnd
             deleteAutorecMessage.Method = "deleteAutorecEntry";
             deleteAutorecMessage.PutField("id", timerId);
 
-            TaskWithTimeoutRunner<HTSMessage> twtr = new TaskWithTimeoutRunner<HTSMessage>(_timeout);
-            TaskWithTimeoutResult<HTSMessage> twtRes = await twtr.RunWithTimeout(Task.Run(
-                () =>
-                {
-                    LoopBackResponseHandler lbrh = new LoopBackResponseHandler();
-                    _htsConnectionHandler.SendMessage(deleteAutorecMessage, lbrh);
-                    LastRecordingChange = DateTime.UtcNow;
-                    return lbrh.GetResponse();
-                },
-                cancellationToken)).ConfigureAwait(false);
-
-            if (twtRes.HasTimeout)
-            {
-                _logger.LogError("LiveTvService.CancelSeriesTimerAsync: can't delete recording because the timeout was reached");
-            }
-            else
-            {
-                HTSMessage deleteAutorecResponse = twtRes.Result;
-                bool success = deleteAutorecResponse.GetInt("success", 0) == 1;
-                if (!success)
-                {
-                    if (deleteAutorecResponse.ContainsField("error"))
-                    {
-                        _logger.LogError("LiveTvService.CancelSeriesTimerAsync: can't delete recording: '{Why}'", deleteAutorecResponse.GetString("error"));
-                    }
-                    else if (deleteAutorecResponse.ContainsField("noaccess"))
-                    {
-                        _logger.LogError("LiveTvService.CancelSeriesTimerAsync: can't delete recording: '{Why}'", deleteAutorecResponse.GetString("noaccess"));
-                    }
-                }
-            }
+            await SendMutationAsync(deleteAutorecMessage, nameof(CancelSeriesTimerAsync), cancellationToken).ConfigureAwait(false);
         }
 
         public async Task CancelTimerAsync(string timerId, CancellationToken cancellationToken)
@@ -121,37 +91,7 @@ namespace TVHeadEnd
             cancelTimerMessage.Method = "cancelDvrEntry";
             cancelTimerMessage.PutField("id", timerId);
 
-            TaskWithTimeoutRunner<HTSMessage> twtr = new TaskWithTimeoutRunner<HTSMessage>(_timeout);
-            TaskWithTimeoutResult<HTSMessage> twtRes = await twtr.RunWithTimeout(Task.Run(
-                () =>
-                {
-                    LoopBackResponseHandler lbrh = new LoopBackResponseHandler();
-                    _htsConnectionHandler.SendMessage(cancelTimerMessage, lbrh);
-                    LastRecordingChange = DateTime.UtcNow;
-                    return lbrh.GetResponse();
-                },
-                cancellationToken)).ConfigureAwait(false);
-
-            if (twtRes.HasTimeout)
-            {
-                _logger.LogError("LiveTvService.CancelTimerAsync: can't cancel timer because the timeout was reached");
-            }
-            else
-            {
-                HTSMessage cancelTimerResponse = twtRes.Result;
-                bool success = cancelTimerResponse.GetInt("success", 0) == 1;
-                if (!success)
-                {
-                    if (cancelTimerResponse.ContainsField("error"))
-                    {
-                        _logger.LogError("LiveTvService.CancelTimerAsync: can't cancel timer: '{Why}'", cancelTimerResponse.GetString("error"));
-                    }
-                    else if (cancelTimerResponse.ContainsField("noaccess"))
-                    {
-                        _logger.LogError("LiveTvService.CancelTimerAsync: can't cancel timer: '{Why}'", cancelTimerResponse.GetString("noaccess"));
-                    }
-                }
-            }
+            await SendMutationAsync(cancelTimerMessage, nameof(CancelTimerAsync), cancellationToken).ConfigureAwait(false);
         }
 
         public async Task CloseLiveStream(string id, CancellationToken cancellationToken)
@@ -176,7 +116,7 @@ namespace TVHeadEnd
             BuildAutorecFields(createAutorecMessage, info);
             createAutorecMessage.PutField("configName", _htsConnectionHandler.GetProfile());
 
-            await SendAutorecMessage(createAutorecMessage, nameof(CreateSeriesTimerAsync), cancellationToken).ConfigureAwait(false);
+            await SendMutationAsync(createAutorecMessage, nameof(CreateSeriesTimerAsync), cancellationToken).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -225,13 +165,18 @@ namespace TVHeadEnd
         }
 
         /// <summary>
-        /// Sends an autorec message and logs whatever TVHeadend reports back.
+        /// Sends a request that changes TVHeadend state and fails unless the server confirmed it.
         /// </summary>
-        /// <param name="message">The autorec message to send.</param>
-        /// <param name="caller">The calling method, used for log context.</param>
+        /// <remarks>
+        /// Jellyfin treats a normal return as success: it deletes its own recording entry, fires
+        /// the timer events and answers 204. A timeout or a rejected request therefore has to
+        /// throw instead of being logged.
+        /// </remarks>
+        /// <param name="message">The request to send.</param>
+        /// <param name="operation">The calling operation, for log and error context.</param>
         /// <param name="cancellationToken">The cancellation token.</param>
-        /// <returns>A task representing the operation.</returns>
-        private async Task SendAutorecMessage(HTSMessage message, string caller, CancellationToken cancellationToken)
+        /// <returns>A task that completes once the server confirmed the change.</returns>
+        private async Task SendMutationAsync(HTSMessage message, string operation, CancellationToken cancellationToken)
         {
             TaskWithTimeoutRunner<HTSMessage> twtr = new TaskWithTimeoutRunner<HTSMessage>(_timeout);
             TaskWithTimeoutResult<HTSMessage> twtRes = await twtr.RunWithTimeout(Task.Run(
@@ -239,31 +184,27 @@ namespace TVHeadEnd
                 {
                     LoopBackResponseHandler lbrh = new LoopBackResponseHandler();
                     _htsConnectionHandler.SendMessage(message, lbrh);
-                    LastRecordingChange = DateTime.UtcNow;
                     return lbrh.GetResponse();
                 },
                 cancellationToken)).ConfigureAwait(false);
 
             if (twtRes.HasTimeout)
             {
-                _logger.LogError("LiveTvService.{Caller}: can't change series timer because the timeout was reached", caller);
-                return;
+                throw new TimeoutException("LiveTvService." + operation + ": TVHeadend did not answer within " + _timeout.TotalSeconds + "s");
             }
 
             HTSMessage response = twtRes.Result;
             if (response.GetInt("success", 0) == 1)
             {
+                LastRecordingChange = DateTime.UtcNow;
                 return;
             }
 
-            if (response.ContainsField("error"))
-            {
-                _logger.LogError("LiveTvService.{Caller}: can't change series timer: '{Why}'", caller, response.GetString("error"));
-            }
-            else if (response.ContainsField("noaccess"))
-            {
-                _logger.LogError("LiveTvService.{Caller}: can't change series timer: user is not allowed to record", caller);
-            }
+            string reason = response.ContainsField("error")
+                ? response.GetString("error") ?? "unknown error"
+                : response.ContainsField("noaccess") ? "the user is not allowed to change recordings" : "the server did not confirm the change";
+            _logger.LogError("LiveTvService.{Operation}: TVHeadend rejected the request: {Reason}", operation, reason);
+            throw new InvalidOperationException("LiveTvService." + operation + ": TVHeadend rejected the request: " + reason);
         }
 
         public async Task CreateTimerAsync(TimerInfo info, CancellationToken cancellationToken)
@@ -283,36 +224,7 @@ namespace TVHeadEnd
             createTimerMessage.PutField("title", info.Name);
             createTimerMessage.PutField("creator", Plugin.Instance.Configuration.Username);
 
-            TaskWithTimeoutRunner<HTSMessage> twtr = new TaskWithTimeoutRunner<HTSMessage>(_timeout);
-            TaskWithTimeoutResult<HTSMessage> twtRes = await twtr.RunWithTimeout(Task.Run(
-                () =>
-                {
-                    LoopBackResponseHandler lbrh = new LoopBackResponseHandler();
-                    _htsConnectionHandler.SendMessage(createTimerMessage, lbrh);
-                    return lbrh.GetResponse();
-                },
-                cancellationToken)).ConfigureAwait(false);
-
-            if (twtRes.HasTimeout)
-            {
-                _logger.LogError("LiveTvService.CreateTimerAsync: can't create timer because the timeout was reached");
-            }
-            else
-            {
-                HTSMessage createTimerResponse = twtRes.Result;
-                bool success = createTimerResponse.GetInt("success", 0) == 1;
-                if (!success)
-                {
-                    if (createTimerResponse.ContainsField("error"))
-                    {
-                        _logger.LogError("LiveTvService.CreateTimerAsync: can't create timer: '{Why}'", createTimerResponse.GetString("error"));
-                    }
-                    else if (createTimerResponse.ContainsField("noaccess"))
-                    {
-                        _logger.LogError("LiveTvService.CreateTimerAsync: can't create timer: '{Why}'", createTimerResponse.GetString("noaccess"));
-                    }
-                }
-            }
+            await SendMutationAsync(createTimerMessage, nameof(CreateTimerAsync), cancellationToken).ConfigureAwait(false);
         }
 
         public async Task DeleteRecordingAsync(string recordingId, CancellationToken cancellationToken)
@@ -323,37 +235,7 @@ namespace TVHeadEnd
             deleteRecordingMessage.Method = "deleteDvrEntry";
             deleteRecordingMessage.PutField("id", recordingId);
 
-            TaskWithTimeoutRunner<HTSMessage> twtr = new TaskWithTimeoutRunner<HTSMessage>(_timeout);
-            TaskWithTimeoutResult<HTSMessage> twtRes = await twtr.RunWithTimeout(Task.Run(
-                () =>
-                {
-                    LoopBackResponseHandler lbrh = new LoopBackResponseHandler();
-                    _htsConnectionHandler.SendMessage(deleteRecordingMessage, lbrh);
-                    LastRecordingChange = DateTime.UtcNow;
-                    return lbrh.GetResponse();
-                },
-                cancellationToken)).ConfigureAwait(false);
-
-            if (twtRes.HasTimeout)
-            {
-                _logger.LogError("LiveTvService.DeleteRecordingAsync: can't delete recording because the timeout was reached");
-            }
-            else
-            {
-                HTSMessage deleteRecordingResponse = twtRes.Result;
-                bool success = deleteRecordingResponse.GetInt("success", 0) == 1;
-                if (!success)
-                {
-                    if (deleteRecordingResponse.ContainsField("error"))
-                    {
-                        _logger.LogError("LiveTvService.DeleteRecordingAsync: can't delete recording: '{Why}'", deleteRecordingResponse.GetString("error"));
-                    }
-                    else if (deleteRecordingResponse.ContainsField("noaccess"))
-                    {
-                        _logger.LogError("LiveTvService.DeleteRecordingAsync: can't delete recording: '{Why}'", deleteRecordingResponse.GetString("noaccess"));
-                    }
-                }
-            }
+            await SendMutationAsync(deleteRecordingMessage, nameof(DeleteRecordingAsync), cancellationToken).ConfigureAwait(false);
         }
 
         public async Task<IEnumerable<ChannelInfo>> GetChannelsAsync(CancellationToken cancellationToken)
@@ -719,7 +601,7 @@ namespace TVHeadEnd
             updateAutorecMessage.PutField("id", info.Id);
             BuildAutorecFields(updateAutorecMessage, info);
 
-            await SendAutorecMessage(updateAutorecMessage, nameof(UpdateSeriesTimerAsync), cancellationToken).ConfigureAwait(false);
+            await SendMutationAsync(updateAutorecMessage, nameof(UpdateSeriesTimerAsync), cancellationToken).ConfigureAwait(false);
         }
 
         public async Task UpdateTimerAsync(TimerInfo updatedTimer, CancellationToken cancellationToken)
@@ -732,35 +614,7 @@ namespace TVHeadEnd
             updateTimerMessage.PutField("startExtra", (long)(updatedTimer.PrePaddingSeconds / 60));
             updateTimerMessage.PutField("stopExtra", (long)(updatedTimer.PostPaddingSeconds / 60));
 
-            TaskWithTimeoutRunner<HTSMessage> twtr = new TaskWithTimeoutRunner<HTSMessage>(_timeout);
-            TaskWithTimeoutResult<HTSMessage> twtRes = await twtr.RunWithTimeout(Task.Run(() =>
-            {
-                LoopBackResponseHandler lbrh = new LoopBackResponseHandler();
-                _htsConnectionHandler.SendMessage(updateTimerMessage, lbrh);
-                LastRecordingChange = DateTime.UtcNow;
-                return lbrh.GetResponse();
-            })).ConfigureAwait(false);
-
-            if (twtRes.HasTimeout)
-            {
-                _logger.LogError("LiveTvService.UpdateTimerAsync: can't update timer because the timeout was reached");
-            }
-            else
-            {
-                HTSMessage updateTimerResponse = twtRes.Result;
-                bool success = updateTimerResponse.GetInt("success", 0) == 1;
-                if (!success)
-                {
-                    if (updateTimerResponse.ContainsField("error"))
-                    {
-                        _logger.LogError("LiveTvService.UpdateTimerAsync: can't update timer: '{Why}'", updateTimerResponse.GetString("error"));
-                    }
-                    else if (updateTimerResponse.ContainsField("noaccess"))
-                    {
-                        _logger.LogError("LiveTvService.UpdateTimerAsync: can't update timer: '{Why}'", updateTimerResponse.GetString("noaccess"));
-                    }
-                }
-            }
+            await SendMutationAsync(updateTimerMessage, nameof(UpdateTimerAsync), cancellationToken).ConfigureAwait(false);
         }
     }
 }

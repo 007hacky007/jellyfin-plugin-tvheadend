@@ -303,6 +303,43 @@ public class ConnectionTests
     }
 
     [Fact]
+    public async Task RejectedMutationThrowsInsteadOfSucceeding()
+    {
+        await using var server = new Peer();
+        Configure(server.Port);
+        using var handler = new HTSConnectionHandler(NullLoggerFactory.Instance);
+        var service = new LiveTvService(NullLoggerFactory.Instance, null!, handler);
+
+        // Jellyfin deletes its recording entry and answers 204 on a normal return, so a
+        // reply without success (or with an error) must throw.
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.DeleteRecordingAsync("1", CancellationToken.None).WaitAsync(Deadline));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.CancelTimerAsync("1", CancellationToken.None).WaitAsync(Deadline));
+        server.AcceptMutations = true;
+        await service.DeleteRecordingAsync("1", CancellationToken.None).WaitAsync(Deadline);
+        await service.CancelTimerAsync("1", CancellationToken.None).WaitAsync(Deadline);
+    }
+
+    [Fact]
+    public async Task ReconnectRebuildsTheMetadataSnapshot()
+    {
+        await using var server = new Peer { Recordings = ["kept", "deleted-during-outage"] };
+        Configure(server.Port);
+        using var handler = new HTSConnectionHandler(NullLoggerFactory.Instance);
+        Assert.Equal(0, await Task.Run(() => handler.WaitForInitialLoad(CancellationToken.None)).WaitAsync(Deadline));
+        var data = Get<Dictionary<string, HTSMessage>>(Get<object>(handler, "_dvrDataHelper"), "_data");
+        Assert.Equal(new[] { "deleted-during-outage", "kept" }, data.Keys.Order().ToArray());
+
+        // The server forgets one recording while the connection is down; the fresh dump on
+        // reconnect must replace the old snapshot instead of being merged into it.
+        server.Recordings = ["kept"];
+        var old = await CurrentConnection(handler);
+        server.CloseClients();
+        await Until(old.NeedsRestart);
+        await AssertSynced(handler);
+        Assert.Equal(new[] { "kept" }, data.Keys.ToArray());
+    }
+
+    [Fact]
     public async Task ProgramRequestThrowsOnDisconnectInsteadOfReturningEmpty()
     {
         await using var server = new Peer { CloseOnEvents = true };
@@ -520,6 +557,8 @@ public class ConnectionTests
         private readonly Task _accept;
         private int _connectionCount;
         public bool Sync = true;
+        public bool AcceptMutations;
+        public string[] Recordings = [];
         public bool Reject;
         public bool IgnoreHello;
         public bool IgnoreEvents;
@@ -603,6 +642,11 @@ public class ConnectionTests
                         }
 
                         if ((request.Method == "authenticate" && Reject) || (request.Method == "getEvents" && RejectEvents)) response.PutField("noaccess", 1);
+                        if (request.Method is "cancelDvrEntry" or "deleteDvrEntry" or "addDvrEntry" or "updateDvrEntry" or "addAutorecEntry" or "updateAutorecEntry" or "deleteAutorecEntry")
+                        {
+                            if (AcceptMutations) response.PutField("success", 1);
+                            else response.PutField("error", "rejected by the test peer");
+                        }
                         if (request.Method == "echo")
                         {
                             EchoSequences.Enqueue(request.GetInt("seq"));
@@ -613,6 +657,13 @@ public class ConnectionTests
                         if (request.Method == "enableAsyncMetadata")
                         {
                             MetadataRequested.TrySetResult();
+                            foreach (var id in Recordings)
+                            {
+                                var entry = new HTSMessage { Method = "dvrEntryAdd" };
+                                entry.PutField("id", id);
+                                await stream.WriteAsync(entry.BuildBytes(), _stop.Token);
+                            }
+
                             if (Sync)
                             {
                                 await stream.WriteAsync(new HTSMessage { Method = "initialSyncCompleted" }.BuildBytes(), _stop.Token);

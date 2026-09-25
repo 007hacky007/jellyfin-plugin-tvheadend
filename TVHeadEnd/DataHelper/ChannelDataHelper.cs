@@ -25,6 +25,17 @@ namespace TVHeadEnd.DataHelper
             _piconData = new Dictionary<string, string>();
         }
 
+        /// <summary>
+        /// Forgets every entry so the next session's dump is not merged into stale state.
+        /// </summary>
+        public void Clear()
+        {
+            lock (_data)
+            {
+                _data.Clear();
+            }
+        }
+
         public void SetChannelType4Other(string? channelType4Other)
         {
             _channelType4Other = channelType4Other ?? "Ignore";
