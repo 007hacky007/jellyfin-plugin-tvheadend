@@ -1,7 +1,7 @@
 name: "TVHeadend Fail-Fast"
 guid: "980dc09b-7127-4a6e-b101-b6ae374ea0cc"
 imageUrl: "https://repo.jellyfin.org/releases/plugin/images/jellyfin-plugin-tvheadend.png"
-version: 15.1.2
+version: 15.1.3
 targetAbi: "12.0.0.0"
 framework: "net10.0"
 owner: "007hacky007"
@@ -11,6 +11,9 @@ category: "LiveTV"
 artifacts:
   - "TVHeadEnd.dll"
 changelog: |-
+  - Every operation that reads or changes TVHeadend state now fails while the server is unavailable instead of returning an empty list or a silent success: Jellyfin no longer deletes recordings from its library during an outage, and a timer or recording change that TVHeadend rejected or did not answer is reported as an error instead of appearing to succeed
+  - The metadata snapshot is rebuilt from the server's dump on every reconnect, so recordings deleted or finished during an outage no longer keep their old state until a restart
+  - Playback tickets, including cached ones, wait for a reconnect instead of handing Jellyfin a stream URL that fails later
   - Rework the connection lifecycle after upstream review: one background loop owns each connection, stale callbacks cannot affect a replacement connection, and shutdown or connection loss wakes every pending request
   - A brief TVHeadend restart is now invisible: the reconnect is immediate and callers wait for it; retries against a server that is really down never block the UI
   - Rejected credentials are retried once the server, username or password in the configuration change (no restart needed); a stalled initial sync or a server that stopped answering triggers a reconnect
