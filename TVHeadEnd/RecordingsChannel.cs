@@ -222,12 +222,20 @@ namespace TVHeadEnd
                 return GetChannelItems(query, i => !i.IsSports && !i.IsNews && !i.IsMovie && !i.IsKids && !i.IsSeries, cancellationToken);
             }
 
-            var result = new ChannelItemResult()
+            return GetUnknownFolderItems(query, cancellationToken);
+        }
+
+        private async Task<ChannelItemResult> GetUnknownFolderItems(InternalChannelItemQuery query, CancellationToken cancellationToken)
+        {
+            // An empty result is authoritative for Jellyfin (it deletes the folder's items), so
+            // even a folder this version does not know must not answer during an outage.
+            await _htsConnectionHandler.EnsureAvailableAsync(nameof(GetChannelItems), cancellationToken).ConfigureAwait(false);
+            _logger.LogWarning("[TVHclient] RecordingsChannel: unknown folder '{FolderId}' requested", query.FolderId);
+
+            return new ChannelItemResult
             {
                 Items = new List<ChannelItemInfo>()
             };
-
-            return Task.FromResult(result);
         }
 
         public async Task<ChannelItemResult> GetChannelItems(InternalChannelItemQuery query, Func<MyRecordingInfo, bool> filter, CancellationToken cancellationToken)

@@ -493,6 +493,14 @@ namespace TVHeadEnd
                         _initialLoadFinished = false;
                         _initialSyncReceived = false;
                         _sessionSynced = false;
+
+                        // The server sends its complete state again after enableAsyncMetadata.
+                        // Start from an empty snapshot so entries that were deleted or changed
+                        // during the outage are not kept (adds for known ids are ignored).
+                        // Callers are gated until this session's sync completes.
+                        _channelDataHelper.Clear();
+                        _dvrDataHelper.Clear();
+                        _autorecDataHelper.Clear();
                         if (attempt == 0)
                         {
                             // Callers wait for this attempt: it is the first one after startup

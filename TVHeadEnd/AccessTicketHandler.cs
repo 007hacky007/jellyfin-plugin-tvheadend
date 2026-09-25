@@ -49,6 +49,10 @@ public class AccessTicketHandler
 
     public async Task<Ticket> GetTicket(string itemId, CancellationToken cancellationToken)
     {
+        // A cached ticket is only useful while the server is reachable; fail here instead of
+        // handing Jellyfin a stream URL that fails later inside the HTTP probe.
+        await _htsConnectionHandler.EnsureAvailableAsync("Obtaining a playback ticket", cancellationToken).ConfigureAwait(false);
+
         var now = DateTime.UtcNow;
         Ticket? ticket = null;
 
@@ -98,7 +102,7 @@ public class AccessTicketHandler
         return RequestTicket(itemId, cancellation).ContinueWith(
             ticketTask =>
             {
-                var response = ticketTask.Result;
+                var response = ticketTask.GetAwaiter().GetResult();
                 var path = response.GetString("path");
                 var ticket = response.GetString("ticket");
 
