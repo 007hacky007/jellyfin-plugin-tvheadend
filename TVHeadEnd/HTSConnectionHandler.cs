@@ -155,6 +155,29 @@ namespace TVHeadEnd
             }
         }
 
+        /// <summary>
+        /// Waits for the initial sync and fails when the server is unavailable.
+        /// </summary>
+        /// <remarks>
+        /// Every Jellyfin-facing operation goes through here so that an outage always surfaces
+        /// as an error. An empty result would be taken as "nothing exists" (Jellyfin deletes
+        /// channels, programs and recordings that are missing from a refresh), and a silent
+        /// return would pretend a timer or recording change succeeded.
+        /// </remarks>
+        /// <param name="operation">The calling operation, for the error message.</param>
+        /// <param name="cancellationToken">The cancellation token.</param>
+        /// <returns>A task that completes once the server is usable.</returns>
+        /// <exception cref="InvalidOperationException">The server is unreachable, rejected the credentials or has not finished the initial sync.</exception>
+        public async Task EnsureAvailableAsync(string operation, CancellationToken cancellationToken)
+        {
+            int result = await Task.Run(() => WaitForInitialLoad(cancellationToken), cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (result == -1)
+            {
+                throw new InvalidOperationException("[TVHclient] " + operation + " is not possible: " + GetUnavailableReason());
+            }
+        }
+
         private void Init()
         {
             lock (_lock)
