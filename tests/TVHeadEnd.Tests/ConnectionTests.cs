@@ -4,9 +4,14 @@ using System.Net;
 using System.Net.Sockets;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using MediaBrowser.Controller.LiveTv;
+using MediaBrowser.Controller.MediaEncoding;
+using MediaBrowser.Model.Dto;
+using MediaBrowser.Model.MediaInfo;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using TVHeadEnd.Configuration;
+using TVHeadEnd.DataHelper;
 using TVHeadEnd.Helper;
 using TVHeadEnd.HTSP;
 using TVHeadEnd.HTSP.Responses;
@@ -467,6 +472,84 @@ public class ConnectionTests
         Assert.Equal(0, handler.WaitForInitialLoad(CancellationToken.None));
     }
 
+    [Fact]
+    public async Task SnapshotBuildersRejectReconnectAfterAvailabilityGate()
+    {
+        await using var server = new Peer();
+        Configure(server.Port);
+        using var handler = new HTSConnectionHandler(NullLoggerFactory.Instance);
+        await handler.EnsureAvailableAsync("test", CancellationToken.None).WaitAsync(Deadline);
+        var old = await CurrentConnection(handler);
+        server.Sync = false;
+        server.CloseClients();
+        await Until(() => !ReferenceEquals(old, Get<HTSConnectionAsync?>(handler, "_htsConnection")) && Get<bool>(handler, "_connected"));
+        Assert.False(Get<bool>(handler, "_initialLoadFinished"));
+
+        // These are the exact calls made after the public operations' availability gate.
+        await Assert.ThrowsAsync<InvalidOperationException>(() => handler.BuildChannelInfos(CancellationToken.None));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => handler.BuildDvrInfos(CancellationToken.None));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => handler.BuildPendingTimersInfos(CancellationToken.None));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => handler.BuildAutorecInfos(CancellationToken.None));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SnapshotCompletionRejectsReplacementEvenWhenItHasSynced(bool syncReplacement)
+    {
+        await using var server = new Peer();
+        Configure(server.Port);
+        using var handler = new HTSConnectionHandler(NullLoggerFactory.Instance);
+        await handler.EnsureAvailableAsync("test", CancellationToken.None).WaitAsync(Deadline);
+        var old = await CurrentConnection(handler);
+        var completion = new TaskCompletionSource<IEnumerable<ChannelInfo>>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var pending = BuildControlledSnapshot(handler, completion.Task, CancellationToken.None);
+        server.Sync = syncReplacement;
+        server.CloseClients();
+        await Until(() => !ReferenceEquals(old, Get<HTSConnectionAsync?>(handler, "_htsConnection")) && Get<bool>(handler, "_connected"));
+        if (syncReplacement) await AssertSynced(handler);
+
+        // Model the builder finishing after it read a cleared or partly rebuilt helper.
+        completion.SetResult([]);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => pending.WaitAsync(Deadline));
+    }
+
+    [Fact]
+    public async Task SnapshotCompletionPreservesCancellation()
+    {
+        await using var server = new Peer();
+        Configure(server.Port);
+        using var handler = new HTSConnectionHandler(NullLoggerFactory.Instance);
+        await handler.EnsureAvailableAsync("test", CancellationToken.None).WaitAsync(Deadline);
+        using var cancellation = new CancellationTokenSource();
+        var completion = new TaskCompletionSource<IEnumerable<ChannelInfo>>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var pending = BuildControlledSnapshot(handler, completion.Task, cancellation.Token);
+        await cancellation.CancelAsync();
+        completion.SetResult([]);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pending.WaitAsync(Deadline));
+    }
+
+    [Fact]
+    public async Task EmptyMetadataBuildersThrowOnCancellation()
+    {
+        var channels = new ChannelDataHelper(NullLogger<ChannelDataHelper>.Instance);
+        var dvr = new DvrDataHelper(NullLogger<DvrDataHelper>.Instance);
+        var autorec = new AutorecDataHelper(NullLogger<AutorecDataHelper>.Instance);
+        var token = new CancellationToken(true);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => channels.BuildChannelInfos(token));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => dvr.BuildDvrInfos(token));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => dvr.BuildPendingTimersInfos(token));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => autorec.BuildAutorecInfos(token));
+    }
+
+    private static Task<IEnumerable<ChannelInfo>> BuildControlledSnapshot(HTSConnectionHandler handler, Task<IEnumerable<ChannelInfo>> result, CancellationToken token)
+    {
+        Func<CancellationToken, Task<IEnumerable<ChannelInfo>>> build = _ => result;
+        return (Task<IEnumerable<ChannelInfo>>)typeof(HTSConnectionHandler)
+            .GetMethod("BuildSnapshotAsync", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .MakeGenericMethod(typeof(ChannelInfo)).Invoke(handler, [build, token])!;
+    }
+
     private static HTSConnectionAsync NewConnection() => new(new Listener(), "test", "1", NullLoggerFactory.Instance);
 
     private static void Configure(int port)
@@ -639,6 +722,12 @@ public class ConnectionTests
                         {
                             response.PutField("htspversion", 40);
                             response.PutField("webroot", "/tvh");
+                        }
+
+                        if (request.Method == "getTicket")
+                        {
+                            response.PutField("path", "/stream/channel/1");
+                            response.PutField("ticket", "ticket");
                         }
 
                         if ((request.Method == "authenticate" && Reject) || (request.Method == "getEvents" && RejectEvents)) response.PutField("noaccess", 1);

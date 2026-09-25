@@ -213,6 +213,7 @@ namespace TVHeadEnd.DataHelper
                         }
                     }
 
+                    cancellationToken.ThrowIfCancellationRequested();
                     return result;
                 }
             });

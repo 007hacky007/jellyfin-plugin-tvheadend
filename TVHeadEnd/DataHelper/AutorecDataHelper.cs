@@ -99,6 +99,7 @@ namespace TVHeadEnd.DataHelper
         {
             return Task.Run<IEnumerable<SeriesTimerInfo>>(() =>
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 lock (_data)
                 {
                     List<SeriesTimerInfo> result = new List<SeriesTimerInfo>();
@@ -246,6 +247,7 @@ namespace TVHeadEnd.DataHelper
                         result.Add(sti);
                     }
 
+                    cancellationToken.ThrowIfCancellationRequested();
                     return result;
                 }
             });
